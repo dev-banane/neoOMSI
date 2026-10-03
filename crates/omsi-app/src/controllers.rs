@@ -75,12 +75,6 @@ pub(crate) struct DeviceCfg {
     pub(crate) ff_invert: Option<bool>,
 }
 
-impl DeviceCfg {
-    pub(crate) fn steers(&self) -> bool {
-        self.axes.iter().any(|a| matches!(a, Some((Func::Steering, _))))
-    }
-}
-
 /// The `gamectrler.cfg` in use: the content folder's (written by the launcher) before
 /// OMSI 2's own.
 pub(crate) fn cfg_path(root: &Path) -> std::path::PathBuf {
@@ -211,6 +205,28 @@ pub fn gamepad_steering(x: f32, kmh: f32) -> f32 {
     let curve = x * x.abs();
     let reach = 1.0 / (1.0 + (kmh.abs() - 10.0).max(0.0) / 20.0);
     curve * reach
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PadDefaults {
+    steering: bool,
+    throttle: bool,
+    brake: bool,
+    look: bool,
+}
+
+impl PadDefaults {
+    fn of(cfg: Option<&DeviceCfg>) -> PadDefaults {
+        let Some(d) = cfg else { return PadDefaults { steering: true, throttle: true, brake: true, look: true } };
+        let has = |f: &[Func]| d.axes.iter().flatten().any(|(g, _)| f.contains(g));
+        let free = |k: usize| d.axes[k].is_none();
+        PadDefaults {
+            steering: !has(&[Func::Steering]) && free(0),
+            throttle: !has(&[Func::Throttle, Func::ThrottleBrake]) && free(5),
+            brake: !has(&[Func::Brake, Func::ThrottleBrake]) && free(2),
+            look: !has(&[Func::LookX, Func::LookY]) && free(3) && free(4),
+        }
+    }
 }
 
 fn stick_steers(current: Option<f32>, set_up: bool, x: f32) -> bool {
@@ -490,7 +506,8 @@ impl Devices {
                 let buttons = declared_button_count(pad.name());
                 #[cfg(not(target_os = "linux"))]
                 let buttons = 0;
-                v.push(Connected { name: pad.name().to_string(), hardware_id: id, axes: di_slots(&axes), gamepad, ff: pad.is_ff_supported(), ff_capable: pad.is_ff_supported(), buttons });
+                let axes = if gamepad { gamepad_axes(&pad) } else { di_slots(&axes) };
+                v.push(Connected { name: pad.name().to_string(), hardware_id: id, axes, gamepad, ff: pad.is_ff_supported(), ff_capable: pad.is_ff_supported(), buttons });
             }
         }
         // (and a wheel gilrs does not list at all: one whose only axes are the simulation
@@ -672,9 +689,22 @@ impl Controllers {
                     for (k, v) in c.axes.iter().copied() {
                         let Some((f, inverted)) = d.axes[k] else { continue };
                         if matches!(f, Func::Steering) {
-                            let (steering, position) = wheel_steering(v, inverted, d.axis_flags[k], dz, self.steer_gain);
-                            set(&mut out.steering, steering);
                             steering_set_up = true;
+                            if c.gamepad {
+                                // a pad's stick set up to steer is still a stick (#200)
+                                let x = if inverted { -v } else { v };
+                                let x = x.signum() * ((x.abs() - dz.max(0.08)).max(0.0) / (1.0 - dz.max(0.08)));
+                                if out.steering.map_or(true, |s| s.abs() < x.abs()) {
+                                    out.steering = Some(x);
+                                    out.stick = true;
+                                }
+                                continue;
+                            }
+                            let (steering, position) = wheel_steering(v, inverted, d.axis_flags[k], dz, self.steer_gain);
+                            if out.steering.map_or(true, |s| s.abs() < steering.abs()) {
+                                out.stick = false;
+                            }
+                            set(&mut out.steering, steering);
                             if steer.is_none() {
                                 steer = Some((c.name.clone(), position, c.ff));
                             }
@@ -740,13 +770,10 @@ impl Controllers {
         let off = self.disabled.clone();
         if let Some(g) = self.devices.gilrs.as_ref() {
             for (_, pad) in g.gamepads() {
-                // (a pad OMSI's gamectrler.cfg names is driven by that file through DirectInput
-                // - except an Xbox-type pad on Windows, whose DirectInput twin is left out
-                // for the system's own layout: with the file naming it, nobody read it, and
-                // its triggers were no pedals, #171)
+                // An Xbox-type pad's DirectInput twin is left out on Windows, so the pad is
+                // read here even when gamectrler.cfg names it (#171).
                 let xinput = cfg!(windows) && xinput_name(pad.name());
-                // A pad set up without a steering axis would otherwise not steer at all.
-                if pad.mapping_source() == gilrs::MappingSource::None || (!xinput && self.cfg.iter().any(|d| names_match(&d.name, pad.name()) && d.steers())) {
+                if pad.mapping_source() == gilrs::MappingSource::None {
                     continue;
                 }
                 #[cfg(target_os = "macos")]
@@ -756,9 +783,11 @@ impl Controllers {
                 if (di && !xinput) || off.iter().any(|d| names_match(d, pad.name())) {
                     continue;
                 }
+                let free = PadDefaults::of(find_device_cfg(&self.cfg, pad.name()));
                 let x = pad.value(Axis::LeftStickX);
                 let x = if x.abs() < 0.08 { 0.0 } else { x };
-                let steers = stick_steers(out.steering, steering_set_up, x);
+                // A pad set up without a steering axis would otherwise not steer at all.
+                let steers = free.steering && stick_steers(out.steering, steering_set_up, x);
                 // (said once per pad: the stick moved, and whether it steers - a report of
                 // "the sticks do nothing" then says which way the pad came in)
                 if x.abs() > 0.5 && !self.announced.iter().any(|n| n == &format!("stick:{}", pad.name())) {
@@ -771,10 +800,14 @@ impl Controllers {
                     out.steering = Some(x);
                     out.stick = true;
                 }
-                out.throttle.get_or_insert(crate::settings::pedal_curve(rt, self.pedal_throttle));
-                out.brake.get_or_insert(crate::settings::pedal_curve(lt, self.pedal_brake));
+                if free.throttle {
+                    out.throttle.get_or_insert(crate::settings::pedal_curve(rt, self.pedal_throttle));
+                }
+                if free.brake {
+                    out.brake.get_or_insert(crate::settings::pedal_curve(lt, self.pedal_brake));
+                }
                 // the right stick looks round, as the truck games have it (#454)
-                if out.look == [0.0, 0.0] {
+                if free.look && out.look == [0.0, 0.0] {
                     out.look = [look_axis(pad.value(Axis::RightStickX)), look_axis(-pad.value(Axis::RightStickY))];
                 }
             }
@@ -1074,6 +1107,22 @@ pub(crate) fn di_slots(axes: &[(u32, f32)]) -> Vec<(usize, f32)> {
     out
 }
 
+/// One fixed layout: the system's own axis codes differ between Windows, Linux and pads.
+pub(crate) const GAMEPAD_AXES: [&str; 6] = ["Left stick X", "Left stick Y", "Left trigger", "Right stick X", "Right stick Y", "Right trigger"];
+
+/// Triggers run -1 released to 1 pressed, like a pedal.
+fn gamepad_axes(pad: &gilrs::Gamepad) -> Vec<(usize, f32)> {
+    let trigger = |b: gilrs::Button| pad.button_data(b).map(|d| d.value()).unwrap_or(0.0) * 2.0 - 1.0;
+    vec![
+        (0, pad.value(Axis::LeftStickX)),
+        (1, pad.value(Axis::LeftStickY)),
+        (2, trigger(gilrs::Button::LeftTrigger2)),
+        (3, pad.value(Axis::RightStickX)),
+        (4, pad.value(Axis::RightStickY)),
+        (5, trigger(gilrs::Button::RightTrigger2)),
+    ]
+}
+
 /// OMSI stores DirectInput's product name; the system's may differ in spacing and case.
 fn normalized_device_name(s: &str) -> String {
     s.to_lowercase().chars().filter(|c| c.is_alphanumeric()).collect()
@@ -1266,13 +1315,19 @@ mod tests {
     }
 
     #[test]
-    fn a_pad_set_up_without_a_steering_axis_does_not_steer_by_the_file() {
-        let mut d = super::DeviceCfg::default();
-        d.axes[5] = Some((super::Func::Throttle, false));
-        d.axes[2] = Some((super::Func::Brake, false));
-        assert!(!d.steers());
-        d.axes[0] = Some((super::Func::Steering, true));
-        assert!(d.steers());
+    fn a_set_up_pad_keeps_the_defaults_its_file_leaves_free() {
+        use super::{DeviceCfg, Func, PadDefaults};
+        assert_eq!(PadDefaults::of(None), PadDefaults { steering: true, throttle: true, brake: true, look: true });
+        let mut d = DeviceCfg::default();
+        d.axes[5] = Some((Func::Throttle, false));
+        d.axes[2] = Some((Func::Brake, false));
+        assert_eq!(PadDefaults::of(Some(&d)), PadDefaults { steering: true, throttle: false, brake: false, look: true });
+        d.axes[0] = Some((Func::LookX, false));
+        let free = PadDefaults::of(Some(&d));
+        assert!(!free.steering && !free.look);
+        let mut e = DeviceCfg::default();
+        e.axes[3] = Some((Func::Steering, false));
+        assert!(!PadDefaults::of(Some(&e)).steering);
     }
 
     #[test]

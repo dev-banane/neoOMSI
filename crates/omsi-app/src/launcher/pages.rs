@@ -1248,7 +1248,7 @@ fn game_controllers(l: &mut Launcher, body: Rect) {
             feedback_setup(&mut l.ui, inner, w, d, &live, live_dev, &mut pv.io, &mut pv.feedback_test, hwnd,
                            l.state.settings.get("ff_invert").and_then(|v| v.as_bool()).unwrap_or(false))
         } else {
-            wizard(&mut l.ui, inner, w, d, &live, live_dev.is_some(), live_dev.is_some_and(|c| c.ff_capable && !c.gamepad))
+            wizard(&mut l.ui, inner, w, d, &live, live_dev.is_some(), live_dev.is_some_and(|c| c.ff_capable && !c.gamepad), live_dev.is_some_and(|c| c.gamepad))
         };
         match done {
             Some(true) => {
@@ -1281,7 +1281,8 @@ fn game_controllers(l: &mut Launcher, body: Rect) {
     if l.ui.button("pad-wizard", Rect::new(inner.right() - 220.0, inner.y - 36.0, 220.0, 30.0), "Set up step by step", Some("touch_app"), ButtonKind::Normal) {
         pv.wizard = Some(Wizard { step: 0, rest: [None; 8], at: Vec::new(), error: None, calibration: None, ff_choice: None, test_strength: crate::ffb_calibration::PULSE_FORCE });
     }
-    const AXES: [&str; 8] = ["X axis", "Y axis", "Z axis", "X rotation", "Y rotation", "Z rotation", "Slider 1", "Slider 2"];
+    let gamepad = live_dev.is_some_and(|c| c.gamepad);
+    let axis_label = axis_names(gamepad);
     let funcs: Vec<String> = Func::LABELS.iter().map(|s| s.to_string()).collect();
     let mut actions: Vec<String> = vec!["<none>".into()];
     actions.extend(l.state.keybindings.get("vehicles").and_then(|a| a.as_array()).map(|a| a.iter().filter_map(|b| b.get("action").and_then(|x| x.as_str()).map(String::from)).collect::<Vec<_>>()).unwrap_or_default());
@@ -1341,8 +1342,11 @@ fn game_controllers(l: &mut Launcher, body: Rect) {
         let bar_w = (w - lab_w - sel_w - inv_w - shp_w - 4.0 * GAP).max(30.0);
         let shapes: Vec<String> = crate::controllers::AXIS_SHAPES.iter().map(|s| s.0.to_string()).collect();
         for a in 0..8 {
+            if axis_label[a].is_empty() && d.axes[a].is_none() {
+                continue;
+            }
             let r = Rect::new(x0, y, w, ROW);
-            ui.label(Rect::new(r.x, r.y, lab_w, r.h), AXES[a]);
+            ui.label(Rect::new(r.x, r.y, lab_w, r.h), if axis_label[a].is_empty() { "-" } else { axis_label[a] });
             let bar = Rect::new(r.x + lab_w + GAP, r.y + 12.0, bar_w, r.h - 24.0);
             ui.p().rounded(bar, 4.0, Color::WHITE.alpha(0.06));
             if let Some((_, v)) = live.iter().find(|(k, _)| *k == a) {
@@ -1436,6 +1440,15 @@ fn game_controllers(l: &mut Launcher, body: Rect) {
     }
 }
 
+fn axis_names(gamepad: bool) -> [&'static str; 8] {
+    if gamepad {
+        let g = crate::controllers::GAMEPAD_AXES;
+        [g[0], g[1], g[2], g[3], g[4], g[5], "", ""]
+    } else {
+        ["X axis", "Y axis", "Z axis", "X rotation", "Y rotation", "Z rotation", "Slider 1", "Slider 2"]
+    }
+}
+
 /// The steps of the set-up assistant (see `Wizard`): what the player is asked each time.
 const WIZARD_STEPS: [(&str, &str); 5] = [
     ("Let go of everything", "Take your hands off the wheel and your feet off the pedals (the wheel in the middle), then press Next."),
@@ -1447,7 +1460,7 @@ const WIZARD_STEPS: [(&str, &str); 5] = [
 
 /// One frame of the assistant in `r`; Some(true) when it has set the device up, Some(false)
 /// when the player gave up.
-fn wizard(ui: &mut Ui, r: Rect, w: &mut Wizard, d: &mut crate::controllers::DeviceCfg, live: &[(usize, f32)], connected: bool, feedback: bool) -> Option<bool> {
+fn wizard(ui: &mut Ui, r: Rect, w: &mut Wizard, d: &mut crate::controllers::DeviceCfg, live: &[(usize, f32)], connected: bool, feedback: bool, gamepad: bool) -> Option<bool> {
     let (title, text) = WIZARD_STEPS[w.step];
     ui.text_in(&format!("Step {} of {}: {title}", w.step + 1, WIZARD_STEPS.len()), Rect::new(r.x, r.y, r.w, 26.0), 17.0, Weight::Bold, TEXT, Align::Left);
     let mut y = r.y + 34.0;
@@ -1461,7 +1474,8 @@ fn wizard(ui: &mut Ui, r: Rect, w: &mut Wizard, d: &mut crate::controllers::Devi
     // the axes as they stand, so that the player sees the device answer
     for (k, v) in live {
         let bar = Rect::new(r.x + 90.0, y + 8.0, (r.w - 100.0).max(40.0), 8.0);
-        ui.text_in(["X", "Y", "Z", "Rx", "Ry", "Rz", "Slider 1", "Slider 2"][*k], Rect::new(r.x, y, 84.0, 24.0), 12.0, Weight::Medium, TEXT_DIM, Align::Left);
+        let label = if gamepad { axis_names(true)[*k] } else { ["X", "Y", "Z", "Rx", "Ry", "Rz", "Slider 1", "Slider 2"][*k] };
+        ui.text_in(label, Rect::new(r.x, y, 84.0, 24.0), 12.0, Weight::Medium, TEXT_DIM, Align::Left);
         ui.p().rounded(bar, 4.0, Color::WHITE.alpha(0.06));
         let x = bar.x + (v.clamp(-1.0, 1.0) + 1.0) * 0.5 * bar.w;
         ui.p().rounded(Rect::new(x - 2.0, bar.y - 4.0, 4.0, bar.h + 8.0), 2.0, ACCENT);
