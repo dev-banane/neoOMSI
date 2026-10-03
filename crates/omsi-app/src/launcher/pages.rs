@@ -49,6 +49,7 @@ pub struct PadsView {
     /// The button last pressed on the shown device and when: its line is lit, so that one
     /// sees which it is and what it does, and can give it an action there.
     pub last_pressed: Option<(usize, std::time::Instant)>,
+    pub assign: bool,
 }
 
 /// The set-up assistant of a device: the player lets go of everything, then turns the wheel
@@ -1164,6 +1165,8 @@ fn game_controllers(l: &mut Launcher, body: Rect) {
     let inner = l.ui.heading(Rect::new(left.x + 18.0, left.y + 14.0, left.w - 36.0, left.h - 28.0), "Devices", Some("sports_esports"));
     let mut add: Option<String> = None;
     let mut sel = pv.selected;
+    let several = devices.len() + connected.iter().filter(|c| !devices.iter().any(|d| crate::controllers::names_match(&d.name, &c.name))).count() > 1;
+    let mut assign = pv.assign && several;
     let list_r = Rect::new(inner.x - 6.0, inner.y, inner.w + 12.0, inner.h - 108.0);
     let offs: Vec<String> = l.state.settings.get("ctrl_off").and_then(|v| v.as_str()).unwrap_or("").split('|').map(str::to_string).filter(|s| !s.is_empty()).collect();
     {
@@ -1172,12 +1175,22 @@ fn game_controllers(l: &mut Launcher, body: Rect) {
         let connected = &connected;
         ui.scroll_area("pad-list", list_r, &mut |ui, v| {
             let mut y = v.y;
+            if several {
+                let r = Rect::new(v.x + 6.0, y, v.w - 12.0, 44.0);
+                if ui.row("pad-assign", r, assign) {
+                    assign = true;
+                }
+                ui.icon("sports_esports", Vec2::new(r.x + 20.0, r.center().y), 18.0, ACCENT);
+                ui.text_in("Which device does what", Rect::new(r.x + 38.0, r.y, r.w - 50.0, r.h), 13.0, Weight::Bold, TEXT, Align::Left);
+                y += 52.0;
+            }
             for (i, d) in devices.iter().enumerate() {
                 let on = connected.iter().any(|c| crate::controllers::names_match(&d.name, &c.name));
                 let switched_off = offs.iter().any(|o| o.eq_ignore_ascii_case(&d.name));
                 let r = Rect::new(v.x + 6.0, y, v.w - 12.0, 44.0);
-                if ui.row(&format!("pad-{i}"), r, sel == i) {
+                if ui.row(&format!("pad-{i}"), r, !assign && sel == i) {
                     sel = i;
+                    assign = false;
                 }
                 ui.text_in(&d.name, Rect::new(r.x + 12.0, r.y, r.w - 40.0, r.h), 13.0, Weight::Medium, if on { TEXT } else { TEXT_DIM }, Align::Left);
                 if switched_off {
@@ -1200,9 +1213,10 @@ fn game_controllers(l: &mut Launcher, body: Rect) {
             y - v.y
         });
     }
-    if sel != pv.selected {
+    if sel != pv.selected || assign != pv.assign {
         release_feedback(&mut pv.io, &mut pv.feedback_test);
         pv.selected = sel;
+        pv.assign = assign;
         pv.capturing = false;
         pv.revealed_button = None;
         pv.wizard = None;
@@ -1210,6 +1224,7 @@ fn game_controllers(l: &mut Launcher, body: Rect) {
     if let Some(name) = add {
         devices.push(DeviceCfg { name, second: "0".into(), ..Default::default() });
         pv.selected = devices.len() - 1;
+        pv.assign = false;
         pv.revealed_button = None;
         pv.dirty = true;
         // a new device starts with the assistant
@@ -1234,6 +1249,11 @@ fn game_controllers(l: &mut Launcher, body: Rect) {
     }
     // the device shown
     l.ui.panel(right);
+    if pv.assign {
+        let inner = l.ui.heading(Rect::new(right.x + 18.0, right.y + 14.0, right.w - 36.0, right.h - 28.0), "Which device does what", Some("sports_esports"));
+        assignments(&mut l.ui, &mut l.state.settings, &mut l.state.settings_dirty, inner, devices, &connected);
+        return;
+    }
     let Some(d) = devices.get_mut(pv.selected) else { return };
     let inner = l.ui.heading(Rect::new(right.x + 18.0, right.y + 14.0, right.w - 36.0, right.h - 28.0), &d.name.clone(), Some("tune"));
     let live_dev = connected.iter().find(|c| crate::controllers::names_match(&d.name, &c.name));
@@ -1437,6 +1457,44 @@ fn game_controllers(l: &mut Launcher, body: Rect) {
     let add_r = Rect::new(inner.x, inner.bottom() - 40.0, 260.0, 36.0);
     if l.ui.button("pad-add-button", add_r, if pv.capturing { "Press a button on the device…" } else { "Add a button" }, Some("add"), ButtonKind::Normal) {
         pv.capturing = !pv.capturing;
+    }
+}
+
+fn assignments(ui: &mut Ui, settings: &mut Value, dirty: &mut f32, r: Rect, devices: &[crate::controllers::DeviceCfg], connected: &[crate::controllers::Connected]) {
+    use crate::controllers::{names_match, ASSIGNABLE};
+    let mut sources = crate::controllers::parse_assign(settings.get("ctrl_assign").and_then(|v| v.as_str()).unwrap_or(""));
+    let mut names: Vec<String> = devices.iter().map(|d| d.name.clone()).collect();
+    for n in connected.iter().map(|c| &c.name).chain(sources.iter().flatten()) {
+        if !names.iter().any(|m| names_match(m, n)) {
+            names.push(n.clone());
+        }
+    }
+    let mut options = vec!["Automatic (the one moved furthest)".to_string()];
+    options.extend(names.iter().cloned());
+    let mut y = r.y;
+    y += ui.paragraph("With several devices connected, each control comes from the one moved furthest. Choose a device for it here and only that one gives it - a pad lying beside the wheel or a second set of pedals no longer gets in the way. While the device chosen is not connected, the control stays automatic.", Vec2::new(r.x, y), r.w, 13.5, Weight::Regular, TEXT_SOFT) + 16.0;
+    let lab_w = 120.0;
+    let mut changed = false;
+    for (i, (_, label)) in ASSIGNABLE.iter().enumerate() {
+        let row = Rect::new(r.x, y, r.w, ROW);
+        ui.label(Rect::new(row.x, row.y, lab_w, row.h), label);
+        let mut sel = sources[i].as_ref().and_then(|s| names.iter().position(|n| names_match(n, s))).map_or(0, |p| p + 1);
+        if ui.select(&format!("pad-assign-{i}"), Rect::new(row.x + lab_w + GAP, row.y, (row.w - lab_w - GAP).min(420.0), row.h), &mut sel, &options) {
+            sources[i] = sel.checked_sub(1).map(|k| names[k].clone());
+            changed = true;
+        }
+        y += ROW + 4.0;
+        if let Some(s) = &sources[i] {
+            let on = connected.iter().any(|c| names_match(s, &c.name));
+            let note = if on { format!("Only {s} gives it.") } else { format!("{s} is not connected: automatic until it is.") };
+            ui.text_in(&note, Rect::new(row.x + lab_w + GAP, y, row.w - lab_w - GAP, 18.0), 12.0, Weight::Regular, if on { TEXT_DIM } else { WARN }, Align::Left);
+            y += 22.0;
+        }
+        y += 8.0;
+    }
+    if changed {
+        settings["ctrl_assign"] = json!(crate::controllers::assign_text(&sources));
+        *dirty = 0.3;
     }
 }
 

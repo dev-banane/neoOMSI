@@ -28,6 +28,9 @@ impl App {
         if ctl.disabled.is_empty() && !self.settings.ctrl_off.is_empty() {
             ctl.disabled = self.settings.ctrl_off.split('|').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
         }
+        if ctl.sources.iter().all(Option::is_none) && !self.settings.ctrl_assign.is_empty() {
+            ctl.sources = crate::controllers::parse_assign(&self.settings.ctrl_assign);
+        }
         let analog = ctl.poll();
         let actions = std::mem::take(&mut ctl.actions);
         let moved = match (analog.steering, self.last_ctl_steer) {

@@ -207,6 +207,34 @@ pub fn gamepad_steering(x: f32, kmh: f32) -> f32 {
     curve * reach
 }
 
+pub(crate) const ASSIGNABLE: [(&str, &str); 4] = [("steering", "Steering"), ("throttle", "Throttle"), ("brake", "Brake"), ("clutch", "Clutch")];
+
+pub(crate) fn parse_assign(text: &str) -> [Option<String>; 4] {
+    let mut out: [Option<String>; 4] = Default::default();
+    for part in text.split('|') {
+        let Some((k, v)) = part.split_once('=') else { continue };
+        if let Some(i) = ASSIGNABLE.iter().position(|(key, _)| key.eq_ignore_ascii_case(k.trim())) {
+            out[i] = Some(v.trim().to_string()).filter(|v| !v.is_empty());
+        }
+    }
+    out
+}
+
+pub(crate) fn assign_text(sources: &[Option<String>; 4]) -> String {
+    ASSIGNABLE.iter().zip(sources).filter_map(|((k, _), v)| v.as_ref().map(|v| format!("{k}={v}"))).collect::<Vec<_>>().join("|")
+}
+
+fn may_give(sources: &[Option<String>; 4], present: &[String], i: usize, name: &str) -> bool {
+    match &sources[i] {
+        // "Controller" is also contained in "Controller (Xbox One)".
+        Some(s) if present.iter().any(|p| names_match(s, p)) => {
+            let exact = |n: &str| normalized_device_name(n) == normalized_device_name(s);
+            if present.iter().any(|p| exact(p)) { exact(name) } else { names_match(s, name) }
+        }
+        _ => true,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct PadDefaults {
     steering: bool,
@@ -590,6 +618,7 @@ pub struct Controllers {
     pub pedal_brake: f32,
     /// Devices switched off (Settings: `ctrl_off`): not read at all.
     pub disabled: Vec<String>,
+    pub sources: [Option<String>; 4],
     /// Force feedback the other way round (Settings: `ff_invert`).
     pub ff_invert: bool,
     /// Force feedback and rumble switched on (Settings: `ff_enabled`).
@@ -644,7 +673,7 @@ impl Controllers {
         for c in devices.connected() {
             log::info!("game controller: {} ({})", c.name, if cfg.iter().any(|d| names_match(&d.name, &c.name)) { "set up in gamectrler.cfg" } else if c.gamepad { "as a gamepad" } else { "not set up: its X axis steers" });
         }
-        Controllers { settled: Vec::new(), devices, focused: true, cfg, deadzone: 0.0, pedal_throttle: 1.0, pedal_brake: 1.0, disabled: Vec::new(), ff_invert: false, ff_enabled: true, steer_gain: 1.0, enabled: true, actions: Vec::new(), announced: Vec::new(), notice: None, steer: None, ff_t: 0.0, ff_lateral: 0.0, ff_bump: 0.0, ff_bump_age: 0.0, ff_source_logged: None, rumble: None, #[cfg(all(target_os = "linux", target_pointer_width = "64"))] wheel: None, #[cfg(all(target_os = "linux", target_pointer_width = "64"))] wheel_tried: None }
+        Controllers { settled: Vec::new(), devices, focused: true, cfg, deadzone: 0.0, pedal_throttle: 1.0, pedal_brake: 1.0, disabled: Vec::new(), sources: Default::default(), ff_invert: false, ff_enabled: true, steer_gain: 1.0, enabled: true, actions: Vec::new(), announced: Vec::new(), notice: None, steer: None, ff_t: 0.0, ff_lateral: 0.0, ff_bump: 0.0, ff_bump_age: 0.0, ff_source_logged: None, rumble: None, #[cfg(all(target_os = "linux", target_pointer_width = "64"))] wheel: None, #[cfg(all(target_os = "linux", target_pointer_width = "64"))] wheel_tried: None }
     }
 
     /// A wheel or joystick steers the bus (then the arrow keys look around, as in OMSI:
@@ -673,6 +702,9 @@ impl Controllers {
         let off = self.disabled.clone();
         let mut pads: Vec<(Option<&DeviceCfg>, Connected)> = self.devices.connected().into_iter().filter(|c| !off.iter().any(|d| names_match(d, &c.name))).map(|c| (find_device_cfg(&self.cfg, &c.name), c)).collect();
         pads.sort_by_key(|(cfg, _)| cfg.is_none());
+        let present: Vec<String> = pads.iter().map(|(_, c)| c.name.clone()).collect();
+        let sources = self.sources.clone();
+        let gives = |i: usize, name: &str| may_give(&sources, &present, i, name);
         let mut steer: Option<(String, f32, bool)> = None;
         let mut steering_set_up = false;
         let dz = self.deadzone.clamp(0.0, 0.3);
@@ -689,6 +721,9 @@ impl Controllers {
                     for (k, v) in c.axes.iter().copied() {
                         let Some((f, inverted)) = d.axes[k] else { continue };
                         if matches!(f, Func::Steering) {
+                            if !gives(0, &c.name) {
+                                continue;
+                            }
                             steering_set_up = true;
                             if c.gamepad {
                                 // a pad's stick set up to steer is still a stick (#200)
@@ -729,15 +764,20 @@ impl Controllers {
                         let pedal = crate::settings::pedal_ends(((v + 1.0) * 0.5).clamp(0.0, 1.0));
                         match f {
                             Func::Steering | Func::LookX | Func::LookY => unreachable!("steering and looking handled before pedal mapping"),
-                            Func::Throttle => set(&mut out.throttle, crate::settings::pedal_curve(pedal, self.pedal_throttle)),
-                            Func::Brake => set(&mut out.brake, crate::settings::pedal_curve(pedal, self.pedal_brake)),
-                            Func::Clutch => set(&mut out.clutch, pedal),
+                            Func::Throttle if gives(1, &c.name) => set(&mut out.throttle, crate::settings::pedal_curve(pedal, self.pedal_throttle)),
+                            Func::Brake if gives(2, &c.name) => set(&mut out.brake, crate::settings::pedal_curve(pedal, self.pedal_brake)),
+                            Func::Clutch if gives(3, &c.name) => set(&mut out.clutch, pedal),
                             Func::ThrottleBrake => {
                                 // Omsi.exe: throttle = 2v-1 and brake = 1-2v (v = 0..1), so the
                                 // raw-maximum half is the throttle
-                                set(&mut out.throttle, crate::settings::pedal_curve(v.max(0.0), self.pedal_throttle));
-                                set(&mut out.brake, crate::settings::pedal_curve((-v).max(0.0), self.pedal_brake));
+                                if gives(1, &c.name) {
+                                    set(&mut out.throttle, crate::settings::pedal_curve(v.max(0.0), self.pedal_throttle));
+                                }
+                                if gives(2, &c.name) {
+                                    set(&mut out.brake, crate::settings::pedal_curve((-v).max(0.0), self.pedal_brake));
+                                }
                             }
+                            Func::Throttle | Func::Brake | Func::Clutch => {}
                         }
                     }
                 }
@@ -751,7 +791,7 @@ impl Controllers {
                         log::info!("game controller {} is not set up: its X axis steers", c.name);
                         self.notice = Some(format!("{} is not set up: it steers; set up its pedals and buttons in the launcher (Controls → Game controllers)", c.name));
                     }
-                    if let Some((_, v)) = c.axes.iter().find(|(k, _)| *k == 0) {
+                    if let Some((_, v)) = c.axes.iter().find(|(k, _)| *k == 0).filter(|_| gives(0, &c.name)) {
                         // (a joystick's centre is slack, so it gets a little dead zone; a
                         // force-feedback wheel's is not: 2 % of it held a 1080° wheel's
                         // picture 11° behind the rim, #866)
@@ -787,7 +827,7 @@ impl Controllers {
                 let x = pad.value(Axis::LeftStickX);
                 let x = if x.abs() < 0.08 { 0.0 } else { x };
                 // A pad set up without a steering axis would otherwise not steer at all.
-                let steers = free.steering && stick_steers(out.steering, steering_set_up, x);
+                let steers = free.steering && gives(0, pad.name()) && stick_steers(out.steering, steering_set_up, x);
                 // (said once per pad: the stick moved, and whether it steers - a report of
                 // "the sticks do nothing" then says which way the pad came in)
                 if x.abs() > 0.5 && !self.announced.iter().any(|n| n == &format!("stick:{}", pad.name())) {
@@ -800,10 +840,10 @@ impl Controllers {
                     out.steering = Some(x);
                     out.stick = true;
                 }
-                if free.throttle {
+                if free.throttle && gives(1, pad.name()) {
                     out.throttle.get_or_insert(crate::settings::pedal_curve(rt, self.pedal_throttle));
                 }
-                if free.brake {
+                if free.brake && gives(2, pad.name()) {
                     out.brake.get_or_insert(crate::settings::pedal_curve(lt, self.pedal_brake));
                 }
                 // the right stick looks round, as the truck games have it (#454)
@@ -1312,6 +1352,24 @@ mod tests {
         assert!(super::stick_steers(Some(0.02), false, 0.0));
         assert!(!super::stick_steers(Some(0.8), false, 0.3));
         assert!(!super::stick_steers(Some(0.0), true, 1.0));
+    }
+
+    #[test]
+    fn a_device_chosen_for_a_control_gives_it_alone_while_it_is_connected() {
+        let sources = super::parse_assign("steering=G29 Driving Force Racing Wheel|brake=Heusinkveld Sprint|nonsense=x");
+        assert_eq!(sources[0].as_deref(), Some("G29 Driving Force Racing Wheel"));
+        assert_eq!(sources[1], None);
+        assert_eq!(sources[2].as_deref(), Some("Heusinkveld Sprint"));
+        assert_eq!(super::parse_assign(&super::assign_text(&sources)), sources);
+        let present = vec!["G29 Driving Force Racing Wheel".to_string(), "Controller (Xbox One For Windows)".to_string()];
+        assert!(super::may_give(&sources, &present, 0, "G29 Driving Force Racing Wheel"));
+        assert!(!super::may_give(&sources, &present, 0, "Controller (Xbox One For Windows)"));
+        assert!(super::may_give(&sources, &present, 1, "Controller (Xbox One For Windows)"));
+        assert!(super::may_give(&sources, &present, 2, "G29 Driving Force Racing Wheel"));
+        let pads = vec!["Controller".to_string(), "Controller (Xbox One For Windows)".to_string()];
+        let only = super::parse_assign("steering=Controller");
+        assert!(super::may_give(&only, &pads, 0, "Controller"));
+        assert!(!super::may_give(&only, &pads, 0, "Controller (Xbox One For Windows)"));
     }
 
     #[test]
