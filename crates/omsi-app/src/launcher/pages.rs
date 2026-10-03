@@ -50,6 +50,31 @@ pub struct PadsView {
     /// sees which it is and what it does, and can give it an action there.
     pub last_pressed: Option<(usize, std::time::Instant)>,
     pub assign: bool,
+    pub calibrating: Option<Calibrating>,
+}
+
+#[derive(Default)]
+pub struct Calibrating {
+    lo: [Option<f32>; 8],
+    hi: [Option<f32>; 8],
+    centre: [Option<f32>; 8],
+    deadzone: [Option<f32>; 8],
+    cleared: [bool; 8],
+}
+
+impl Calibrating {
+    fn merged(&self, k: usize, old: Option<crate::controllers::AxisCal>) -> Option<crate::controllers::AxisCal> {
+        use crate::controllers::AxisCal;
+        let base = if self.cleared[k] { None } else { old };
+        let (min, max) = match (self.lo[k], self.hi[k]) {
+            (Some(lo), Some(hi)) if hi - lo >= AxisCal::MIN_SPAN => (lo, hi),
+            _ => base.map_or((-1.0, 1.0), |b| (b.min, b.max)),
+        };
+        let centre = self.centre[k].or(base.and_then(|b| b.centre));
+        let deadzone = self.deadzone[k].or(base.and_then(|b| b.deadzone));
+        let cal = AxisCal { min, centre, max, deadzone };
+        (min != -1.0 || max != 1.0 || centre.is_some() || deadzone.is_some()).then_some(cal)
+    }
 }
 
 /// The set-up assistant of a device: the player lets go of everything, then turns the wheel
@@ -1167,7 +1192,7 @@ fn game_controllers(l: &mut Launcher, body: Rect) {
     let mut sel = pv.selected;
     let several = devices.len() + connected.iter().filter(|c| !devices.iter().any(|d| crate::controllers::names_match(&d.name, &c.name))).count() > 1;
     let mut assign = pv.assign && several;
-    let list_r = Rect::new(inner.x - 6.0, inner.y, inner.w + 12.0, inner.h - 108.0);
+    let list_r = Rect::new(inner.x - 6.0, inner.y, inner.w + 12.0, inner.h - 58.0);
     let offs: Vec<String> = l.state.settings.get("ctrl_off").and_then(|v| v.as_str()).unwrap_or("").split('|').map(str::to_string).filter(|s| !s.is_empty()).collect();
     {
         let ui = &mut l.ui;
@@ -1220,22 +1245,17 @@ fn game_controllers(l: &mut Launcher, body: Rect) {
         pv.capturing = false;
         pv.revealed_button = None;
         pv.wizard = None;
+        pv.calibrating = None;
     }
     if let Some(name) = add {
         devices.push(DeviceCfg { name, second: "0".into(), ..Default::default() });
         pv.selected = devices.len() - 1;
         pv.assign = false;
+        pv.calibrating = None;
         pv.revealed_button = None;
         pv.dirty = true;
         // a new device starts with the assistant
         pv.wizard = Some(Wizard { step: 0, rest: [None; 8], at: Vec::new(), error: None, calibration: None, ff_choice: None, test_strength: crate::ffb_calibration::PULSE_FORCE });
-    }
-    // the dead zone (a setting of the game's)
-    let dz_r = Rect::new(inner.x, inner.bottom() - 98.0, inner.w, 34.0);
-    let mut dz = l.state.settings.get("ctrl_deadzone").and_then(|x| x.as_f64()).unwrap_or(0.0) as f32;
-    if l.ui.slider("pad-dz", dz_r, &mut dz, 0.0, 0.3, 0.01, "Dead zone", &|v| format!("{:.0} %", v * 100.0)) {
-        l.state.settings["ctrl_deadzone"] = json!(dz);
-        l.state.settings_dirty = 0.3;
     }
     let save_r = Rect::new(inner.x, inner.bottom() - 48.0, inner.w, 40.0);
     if l.ui.button("pad-save", save_r, if pv.dirty { "Save" } else { "Saved" }, Some("save"), if pv.dirty { ButtonKind::Primary } else { ButtonKind::Normal }) && pv.dirty {
@@ -1285,6 +1305,19 @@ fn game_controllers(l: &mut Launcher, body: Rect) {
         }
         return;
     }
+    if let Some(c) = pv.calibrating.as_mut() {
+        let global_dz = l.state.settings.get("ctrl_deadzone").and_then(|x| x.as_f64()).unwrap_or(0.0) as f32;
+        match calibration(&mut l.ui, inner, c, d, &live, live_dev.is_some_and(|c| c.gamepad), d.deadzone.unwrap_or(global_dz)) {
+            Some(true) => {
+                pv.calibrating = None;
+                pv.dirty = true;
+                l.state.set_status("Calibrated: press Save to keep it.", false);
+            }
+            Some(false) => pv.calibrating = None,
+            None => {}
+        }
+        return;
+    }
     // this device on or off (a second listing of the same wheel, a device not to be used)
     {
         let offs: Vec<String> = l.state.settings.get("ctrl_off").and_then(|v| v.as_str()).unwrap_or("").split('|').map(str::to_string).filter(|s| !s.is_empty()).collect();
@@ -1329,11 +1362,18 @@ fn game_controllers(l: &mut Launcher, body: Rect) {
     // (the axes, then every button of the device: the list scrolls - it stopped at the ten
     // buttons that fitted)
     let list = Rect::new(inner.x - 6.0, inner.y, inner.w + 12.0, inner.h - 50.0);
+    let default_dz = l.state.settings.get("ctrl_deadzone").and_then(|x| x.as_f64()).unwrap_or(0.0) as f32;
     let mut buttons_start_y = 0.0;
     l.ui.scroll_area("pad-detail", list, &mut |ui, v| {
         let x0 = v.x + 6.0;
         let w = v.w - 16.0;
         let mut y = v.y;
+        let mut dz = d.deadzone.unwrap_or(default_dz);
+        if ui.slider("pad-dz", Rect::new(x0, y, w, ROW), &mut dz, 0.0, 0.3, 0.01, "Dead zone", &|v| format!("{:.0} %", v * 100.0)) {
+            d.deadzone = Some((dz * 100.0).round() / 100.0);
+            dirty = true;
+        }
+        y += ROW + 12.0;
         if live_dev.is_some_and(|c| c.ff_capable) || d.ff_invert.is_some() {
             let (mut steering_force, mut vibration) = d.ff_scale.unwrap_or((1.0, 1.0));
             if ui.slider("pad-ff-steering", Rect::new(x0, y, w, ROW), &mut steering_force, 0.0, 2.0, 0.05, "Steering force", &|v| format!("{:.0}%", v * 100.0)) {
@@ -1370,6 +1410,7 @@ fn game_controllers(l: &mut Launcher, body: Rect) {
             let bar = Rect::new(r.x + lab_w + GAP, r.y + 12.0, bar_w, r.h - 24.0);
             ui.p().rounded(bar, 4.0, Color::WHITE.alpha(0.06));
             if let Some((_, v)) = live.iter().find(|(k, _)| *k == a) {
+                let v = d.calibrated(a, *v);
                 let x = bar.x + (v.clamp(-1.0, 1.0) + 1.0) * 0.5 * bar.w;
                 ui.p().rounded(Rect::new(x - 2.0, bar.y - 3.0, 4.0, bar.h + 6.0), 2.0, ACCENT);
             }
@@ -1458,6 +1499,11 @@ fn game_controllers(l: &mut Launcher, body: Rect) {
     if l.ui.button("pad-add-button", add_r, if pv.capturing { "Press a button on the device…" } else { "Add a button" }, Some("add"), ButtonKind::Normal) {
         pv.capturing = !pv.capturing;
     }
+    let cal_r = Rect::new(add_r.right() + GAP, add_r.y, 200.0, 36.0);
+    if l.ui.button("pad-calibrate", cal_r, "Calibrate axes", Some("tune"), ButtonKind::Normal) {
+        pv.capturing = false;
+        pv.calibrating = Some(Calibrating::default());
+    }
 }
 
 fn assignments(ui: &mut Ui, settings: &mut Value, dirty: &mut f32, r: Rect, devices: &[crate::controllers::DeviceCfg], connected: &[crate::controllers::Connected]) {
@@ -1505,6 +1551,85 @@ fn axis_names(gamepad: bool) -> [&'static str; 8] {
     } else {
         ["X axis", "Y axis", "Z axis", "X rotation", "Y rotation", "Z rotation", "Slider 1", "Slider 2"]
     }
+}
+
+/// Some(true): applied to `d`; Some(false): cancelled.
+fn calibration(ui: &mut Ui, r: Rect, c: &mut Calibrating, d: &mut crate::controllers::DeviceCfg, live: &[(usize, f32)], gamepad: bool, global_dz: f32) -> Option<bool> {
+    let names = axis_names(gamepad);
+    for (k, v) in live {
+        c.lo[*k] = Some(c.lo[*k].map_or(*v, |lo| lo.min(*v)));
+        c.hi[*k] = Some(c.hi[*k].map_or(*v, |hi| hi.max(*v)));
+    }
+    ui.text_in("Calibrate the axes", Rect::new(r.x, r.y, r.w, 26.0), 17.0, Weight::Bold, TEXT, Align::Left);
+    let mut y = r.y + 34.0;
+    y += ui.paragraph("1. Move every axis all the way to both ends a few times: the wheel from lock to lock, each pedal down and back up. 2. Let go of everything (the wheel in the middle) and press Set centre. 3. Apply. An axis that did not move keeps its calibration; the lower bar is what the game gets.", Vec2::new(r.x, y), r.w, 13.0, Weight::Regular, TEXT_SOFT) + 10.0;
+    let by = r.bottom() - 40.0;
+    let list = Rect::new(r.x - 6.0, y, r.w + 12.0, by - y - 10.0);
+    if live.is_empty() {
+        ui.paragraph("The device is not connected: plug it in (the list on the left marks it green).", Vec2::new(r.x, y), r.w, 13.0, Weight::Medium, DANGER);
+    }
+    ui.scroll_area("pad-cal", list, &mut |ui, v| {
+        let x0 = v.x + 6.0;
+        let w = v.w - 16.0;
+        let mut y = v.y;
+        let lab_w = if w < 520.0 { 96.0 } else { 120.0 };
+        let dz_w = (w * 0.3).clamp(150.0, 240.0);
+        let bar_w = (w - lab_w - dz_w - 2.0 * GAP).max(40.0);
+        let at = |bar: &Rect, v: f32| bar.x + (v.clamp(-1.0, 1.0) + 1.0) * 0.5 * bar.w;
+        let mut axes: Vec<(usize, f32)> = live.to_vec();
+        axes.sort_by_key(|(k, _)| *k);
+        for (k, v) in axes {
+            let cal = c.merged(k, d.calibration[k]);
+            ui.text_in(names[k], Rect::new(x0, y, lab_w, 22.0), 13.0, Weight::Medium, TEXT, Align::Left);
+            let raw = Rect::new(x0 + lab_w + GAP, y + 6.0, bar_w, 10.0);
+            ui.p().rounded(raw, 4.0, Color::WHITE.alpha(0.06));
+            if let (Some(lo), Some(hi)) = (cal.map(|c| c.min), cal.map(|c| c.max)) {
+                ui.p().rounded(Rect::new(at(&raw, lo), raw.y, (at(&raw, hi) - at(&raw, lo)).max(2.0), raw.h), 4.0, ACCENT.alpha(0.22));
+            }
+            if let Some(centre) = cal.and_then(|c| c.centre) {
+                ui.p().rounded(Rect::new(at(&raw, centre) - 1.0, raw.y - 4.0, 2.0, raw.h + 8.0), 1.0, ACCENT_2);
+            }
+            ui.p().rounded(Rect::new(at(&raw, v) - 2.0, raw.y - 3.0, 4.0, raw.h + 6.0), 2.0, TEXT_SOFT);
+            ui.text_in("system", Rect::new(x0, y + 22.0, lab_w, 16.0), 11.0, Weight::Regular, TEXT_FAINT, Align::Left);
+            let out_bar = Rect::new(raw.x, y + 26.0, bar_w, 10.0);
+            ui.p().rounded(out_bar, 4.0, Color::WHITE.alpha(0.06));
+            let dz = cal.and_then(|c| c.deadzone).unwrap_or(global_dz);
+            if dz > 0.0 {
+                ui.p().rounded(Rect::new(at(&out_bar, -dz), out_bar.y, at(&out_bar, dz) - at(&out_bar, -dz), out_bar.h), 4.0, Color::WHITE.alpha(0.1));
+            }
+            let out = cal.map_or(v, |c| c.apply(v));
+            ui.p().rounded(Rect::new(at(&out_bar, out) - 2.0, out_bar.y - 3.0, 4.0, out_bar.h + 6.0), 2.0, ACCENT);
+            ui.text_in(&format!("{:+.0} %", out * 100.0), Rect::new(x0, y + 38.0, lab_w, 16.0), 11.0, Weight::Medium, TEXT_DIM, Align::Left);
+            let mut dzv = dz;
+            if ui.slider(&format!("pad-cal-dz-{k}"), Rect::new(raw.right() + GAP, y, dz_w, ROW), &mut dzv, 0.0, 0.3, 0.01, "Dead zone", &|v| format!("{:.0} %", v * 100.0)) {
+                c.deadzone[k] = Some(dzv);
+            }
+            if ui.button(&format!("pad-cal-reset-{k}"), Rect::new(raw.right() + GAP, y + ROW + 4.0, dz_w, 26.0), "As the system reports it", None, ButtonKind::Ghost) {
+                c.lo[k] = None;
+                c.hi[k] = None;
+                c.centre[k] = None;
+                c.deadzone[k] = None;
+                c.cleared[k] = true;
+            }
+            y += ROW + 44.0;
+        }
+        y - v.y
+    });
+    if ui.button("pad-cal-cancel", Rect::new(r.x, by, 120.0, 36.0), "Cancel", None, ButtonKind::Ghost) {
+        return Some(false);
+    }
+    if ui.button("pad-cal-centre", Rect::new(r.right() - 300.0, by, 150.0, 36.0), "Set centre", Some("touch_app"), ButtonKind::Normal) {
+        for (k, v) in live {
+            c.centre[*k] = Some(*v);
+        }
+    }
+    if ui.button("pad-cal-apply", Rect::new(r.right() - 140.0, by, 140.0, 36.0), "Apply", Some("check"), ButtonKind::Primary) {
+        for k in 0..8 {
+            d.calibration[k] = c.merged(k, d.calibration[k]);
+        }
+        return Some(true);
+    }
+    None
 }
 
 /// The steps of the set-up assistant (see `Wizard`): what the player is asked each time.

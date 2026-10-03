@@ -73,6 +73,63 @@ pub(crate) struct DeviceCfg {
     pub(crate) ff_scale: Option<(f32, f32)>,
     /// Motor polarity for this device; None uses the existing global setting.
     pub(crate) ff_invert: Option<bool>,
+    pub(crate) calibration: [Option<AxisCal>; 8],
+    pub(crate) deadzone: Option<f32>,
+}
+
+impl DeviceCfg {
+    pub(crate) fn calibrated(&self, k: usize, v: f32) -> f32 {
+        self.calibration.get(k).copied().flatten().map_or(v, |c| c.apply(v))
+    }
+
+    pub(crate) fn deadzone(&self, k: usize, global: f32) -> f32 {
+        self.calibration.get(k).copied().flatten().and_then(|c| c.deadzone).or(self.deadzone).unwrap_or(global).clamp(0.0, 0.3)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct AxisCal {
+    pub(crate) min: f32,
+    pub(crate) centre: Option<f32>,
+    pub(crate) max: f32,
+    pub(crate) deadzone: Option<f32>,
+}
+
+impl AxisCal {
+    pub(crate) const MIN_SPAN: f32 = 0.2;
+
+    pub(crate) fn apply(&self, v: f32) -> f32 {
+        let (lo, hi) = (self.min.min(self.max), self.min.max(self.max));
+        if hi - lo < Self::MIN_SPAN {
+            return v;
+        }
+        let out = match self.centre.filter(|c| *c > lo + (hi - lo) * 0.1 && *c < hi - (hi - lo) * 0.1) {
+            Some(c) if v < c => (v - c) / (c - lo),
+            Some(c) => (v - c) / (hi - c),
+            None => (v - lo) / (hi - lo) * 2.0 - 1.0,
+        };
+        out.clamp(-1.0, 1.0)
+    }
+
+    fn line(&self) -> String {
+        let opt = |v: Option<f32>| v.map_or("-".to_string(), |v| format!("{v:.4}"));
+        format!("{:.4} {} {:.4} {}", self.min, opt(self.centre), self.max, opt(self.deadzone))
+    }
+
+    fn parse(line: &str) -> Option<AxisCal> {
+        let mut it = line.split_whitespace();
+        let num = |s: Option<&str>| -> Option<Option<f32>> {
+            match s? {
+                "-" => Some(None),
+                s => s.parse::<f32>().ok().filter(|v| v.is_finite()).map(|v| Some(v.clamp(-1.0, 1.0))),
+            }
+        };
+        let min = num(it.next())??;
+        let centre = num(it.next())?;
+        let max = num(it.next())??;
+        let deadzone = num(it.next()).flatten().map(|d| d.clamp(0.0, 0.3));
+        Some(AxisCal { min, centre, max, deadzone })
+    }
 }
 
 /// The `gamectrler.cfg` in use: the content folder's (written by the launcher) before
@@ -144,6 +201,21 @@ pub(crate) fn parse_cfg(text: &str) -> Vec<DeviceCfg> {
                 }
                 i += 2;
             }
+            // OMSI skips sections it doesn't know.
+            "[neoOMSI.Deadzone]" => {
+                if let Some(d) = out.last_mut() {
+                    d.deadzone = lines.get(i + 1).and_then(|v| v.parse::<f32>().ok()).filter(|v| v.is_finite()).map(|v| v.clamp(0.0, 0.3));
+                }
+                i += 2;
+            }
+            "[neoOMSI.Calibration]" => {
+                if let Some(d) = out.last_mut() {
+                    for a in 0..8 {
+                        d.calibration[a] = lines.get(i + 1 + a).and_then(|l| AxisCal::parse(l));
+                    }
+                }
+                i += 9;
+            }
             _ => i += 1,
         }
     }
@@ -170,6 +242,17 @@ pub(crate) fn cfg_text(devices: &[DeviceCfg]) -> String {
         t.push_str(&format!("\r\n[FFScale]\r\n{a:.3}\r\n{b:.3}\r\n\r\n"));
         if let Some(invert) = d.ff_invert {
             t.push_str(&format!("[neoOMSI.FFInvert]\r\n{}\r\n\r\n", invert as u8));
+        }
+        if let Some(dz) = d.deadzone {
+            t.push_str(&format!("[neoOMSI.Deadzone]\r\n{dz:.3}\r\n\r\n"));
+        }
+        if d.calibration.iter().any(Option::is_some) {
+            t.push_str("[neoOMSI.Calibration]\r\n");
+            for c in &d.calibration {
+                t.push_str(&c.map_or("-".to_string(), |c| c.line()));
+                t.push_str("\r\n");
+            }
+            t.push_str("\r\n");
         }
     }
     t
@@ -720,6 +803,8 @@ impl Controllers {
                 Some(d) => {
                     for (k, v) in c.axes.iter().copied() {
                         let Some((f, inverted)) = d.axes[k] else { continue };
+                        let v = d.calibrated(k, v);
+                        let dz = d.deadzone(k, dz);
                         if matches!(f, Func::Steering) {
                             if !gives(0, &c.name) {
                                 continue;
@@ -1352,6 +1437,48 @@ mod tests {
         assert!(super::stick_steers(Some(0.02), false, 0.0));
         assert!(!super::stick_steers(Some(0.8), false, 0.3));
         assert!(!super::stick_steers(Some(0.0), true, 1.0));
+    }
+
+    #[test]
+    fn calibration_stretches_the_travel_and_finds_the_middle() {
+        use super::AxisCal;
+        let pedal = AxisCal { min: -0.9, centre: Some(-0.9), max: 0.8, deadzone: None };
+        assert_eq!(pedal.apply(-0.9), -1.0);
+        assert_eq!(pedal.apply(0.8), 1.0);
+        assert!((pedal.apply(-0.05) - 0.0).abs() < 1e-6);
+        assert_eq!(pedal.apply(-1.0), -1.0);
+        let wheel = AxisCal { min: -0.95, centre: Some(0.1), max: 1.0, deadzone: None };
+        assert_eq!(wheel.apply(0.1), 0.0);
+        assert!((wheel.apply(0.55) - 0.5).abs() < 1e-6);
+        assert!((wheel.apply(-0.425) + 0.5).abs() < 1e-6);
+        let still = AxisCal { min: 0.1, centre: None, max: 0.15, deadzone: None };
+        assert_eq!(still.apply(0.3), 0.3);
+    }
+
+    #[test]
+    fn calibration_and_dead_zone_go_through_the_file() {
+        let mut d = super::DeviceCfg { name: "Wheel".into(), second: "0".into(), ..Default::default() };
+        d.axes[0] = Some((super::Func::Steering, false));
+        d.calibration[0] = Some(super::AxisCal { min: -0.95, centre: Some(0.02), max: 0.97, deadzone: Some(0.05) });
+        d.calibration[5] = Some(super::AxisCal { min: -1.0, centre: None, max: 0.6, deadzone: None });
+        let back = super::parse_cfg(&super::cfg_text(std::slice::from_ref(&d)));
+        assert_eq!(back.len(), 1);
+        assert_eq!(back[0].calibration[0], d.calibration[0]);
+        assert_eq!(back[0].calibration[5], d.calibration[5]);
+        assert_eq!(back[0].calibration[1], None);
+        assert_eq!(back[0].deadzone(0, 0.2), 0.05);
+        assert_eq!(back[0].deadzone(1, 0.2), 0.2);
+        let mut own = d.clone();
+        own.deadzone = Some(0.08);
+        let own = super::parse_cfg(&super::cfg_text(std::slice::from_ref(&own))).remove(0);
+        assert_eq!(own.deadzone, Some(0.08));
+        assert_eq!(own.deadzone(0, 0.2), 0.05);
+        assert_eq!(own.deadzone(1, 0.2), 0.08);
+        let mut plain = d.clone();
+        plain.calibration = Default::default();
+        let text = super::cfg_text(std::slice::from_ref(&plain));
+        assert!(!text.contains("Calibration"));
+        assert_eq!(super::parse_cfg(&text)[0].calibrated(0, 0.3), 0.3);
     }
 
     #[test]
