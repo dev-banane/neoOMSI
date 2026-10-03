@@ -159,80 +159,23 @@ pub(super) fn options_pages(app: &App) -> Vec<Page> {
         .collect();
     let controls: Vec<(String, String)> = vec![
         pick("drive_keys", "Driving keys", "Which keys drive the vehicle"),
-        Some(opens(
-            "Key bindings",
-            "Set every key of the bus and of the game",
-            "keysopts",
-        )),
-        switch_row(
-            app,
-            "mouse",
-            "Steering with the mouse",
-            "Steer and control the pedals using the mouse",
-        ),
-        switch_row(
-            app,
-            "mouse_right",
-            "A right click ends the mouse steering",
-            "As in OMSI; off: the right button only looks round",
-        ),
-        slider_row(
-            app,
-            "mouse_sens",
-            "Mouse steering sensitivity",
-            "Adjust how much the steering wheel turns based on mouse movement",
-            &pct,
-        ),
-        slider_row(
-            app,
-            "pedal_t",
-            "Throttle pedal strength",
-            "Adjust how strongly pedal input affects the throttle",
-            &|v| format!("x{v}"),
-        ),
-        slider_row(
-            app,
-            "pedal_b",
-            "Brake pedal strength",
-            "Adjust how strongly pedal input affects the brake",
-            &|v| format!("x{v}"),
-        ),
-        slider_row(
-            app,
-            "wheel_range",
-            "Wheel rotation",
-            "The steering wheel's own rotation, lock to lock",
-            &|v| format!("{v:.0}°"),
-        ),
-        slider_row(
-            app,
-            "wheel_lock",
-            "Full lock at",
-            "How far the wheel turns for the vehicle's full lock",
-            &|v| {
-                if v < 45.0 {
-                    "OMSI".to_string()
-                } else {
-                    format!("{v:.0}°")
-                }
-            },
-        ),
-        switch_row(
-            app,
-            "ff",
-            "Force feedback and vibration",
-            "Enable force feedback for the steering wheel and vibration for controllers",
-        ),
-        switch_row(
-            app,
-            "ff_invert",
-            "Invert force feedback by default",
-            "For wheels without a saved direction",
-        ),
+        Some(opens("Key bindings", "Set every key of the bus and of the game", "keysopts")),
+        switch_row(app, "mouse", "Steering with the mouse", "Steer and control the pedals using the mouse"),
+        switch_row(app, "mouse_right", "A right click ends the mouse steering", "As in OMSI; off: the right button only looks round"),
+        slider_row(app, "mouse_sens", "Mouse steering sensitivity", "Adjust how much the steering wheel turns based on mouse movement", &pct),
+        slider_row(app, "stick_sens", "Gamepad steering sensitivity", "How much a small push of the stick turns the wheel, and how fast (pushed all the way it is still the full lock)", &pct),
+        switch_row(app, "steer_center", "Wheel returns to the middle", "A controller a hair off the middle steers straight: the wheel does not stay a little left or right when let go"),
+        slider_row(app, "ctrl_deadzone", "Default controller dead zone", "How far round the middle of an axis does nothing, for controllers without a dead zone of their own (set per controller in the launcher)", &pct),
+        slider_row(app, "pedal_t", "Throttle pedal strength", "Adjust how strongly pedal input affects the throttle", &|v| format!("x{v}")),
+        slider_row(app, "pedal_b", "Brake pedal strength", "Adjust how strongly pedal input affects the brake", &|v| format!("x{v}")),
+        slider_row(app, "wheel_range", "Wheel rotation", "The steering wheel's own rotation, lock to lock", &|v| format!("{v:.0}°")),
+        slider_row(app, "wheel_lock", "Full lock at", "How far the wheel turns for the vehicle's full lock", &|v| if v < 45.0 { "OMSI".to_string() } else { format!("{v:.0}°") }),
+        switch_row(app, "ff", "Force feedback and vibration", "Enable force feedback for the steering wheel and vibration for controllers"),
+        switch_row(app, "ff_invert", "Invert force feedback by default", "For wheels without a saved direction"),
     ]
-    .into_iter()
-    .flatten()
-    .collect();
+        .into_iter()
+        .flatten()
+        .collect();
     let mut camera: Vec<(String, String)> = vec![
         slider_row(
             app,
