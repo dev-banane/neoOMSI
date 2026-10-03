@@ -639,6 +639,12 @@ fn driving_tab(ui: &mut Ui, s: &mut Value, dirty: &mut f32, out: &mut Outside, c
         s["mouse_sens"] = json!((ms * 100.0).round() / 100.0);
         *dirty = 0.3;
     }
+    let mut ss = get(s, "stick_sens").as_f64().unwrap_or(0.25) as f32;
+    if ui.slider("s-stick", c.row(), &mut ss, 0.1, 2.0, 0.05, "Gamepad steering sensitivity", &|v| format!("{:.0}%", v * 100.0)) {
+        s["stick_sens"] = json!((ss * 100.0).round() / 100.0);
+        *dirty = 0.3;
+    }
+    toggle_setting(ui, s, dirty, c.row(), "The wheel returns to the middle (a controller a hair off it is the middle)", "steer_center");
     toggle_setting(ui, s, dirty, c.row(), "A right click ends the mouse steering (as in OMSI)", "mouse_right_off");
     toggle_setting(ui, s, dirty, c.row(), "Indicators cancel themselves (as the bus's script does)", "blinker_cancel");
     toggle_setting(ui, s, dirty, c.row(), "The keyboard brake stays on until the throttle (as in OMSI)", "brake_hold");
@@ -1306,7 +1312,7 @@ fn game_controllers(l: &mut Launcher, body: Rect) {
         return;
     }
     if let Some(c) = pv.calibrating.as_mut() {
-        let global_dz = l.state.settings.get("ctrl_deadzone").and_then(|x| x.as_f64()).unwrap_or(0.0) as f32;
+        let global_dz = l.state.settings.get("ctrl_deadzone").and_then(|x| x.as_f64()).unwrap_or(0.05) as f32;
         match calibration(&mut l.ui, inner, c, d, &live, live_dev.is_some_and(|c| c.gamepad), d.deadzone.unwrap_or(global_dz)) {
             Some(true) => {
                 pv.calibrating = None;
@@ -1362,7 +1368,7 @@ fn game_controllers(l: &mut Launcher, body: Rect) {
     // (the axes, then every button of the device: the list scrolls - it stopped at the ten
     // buttons that fitted)
     let list = Rect::new(inner.x - 6.0, inner.y, inner.w + 12.0, inner.h - 50.0);
-    let default_dz = l.state.settings.get("ctrl_deadzone").and_then(|x| x.as_f64()).unwrap_or(0.0) as f32;
+    let default_dz = l.state.settings.get("ctrl_deadzone").and_then(|x| x.as_f64()).unwrap_or(0.05) as f32;
     let mut buttons_start_y = 0.0;
     l.ui.scroll_area("pad-detail", list, &mut |ui, v| {
         let x0 = v.x + 6.0;
@@ -2469,7 +2475,7 @@ mod settings_tests {
             graphics.push("s-api");
         }
         let driving = vec![
-            "s-keys", "set-steering_linear", "set-old_steering", "set-red_steer_spd", "s-mouse", "set-mouse_right_off", "set-blinker_cancel", "set-brake_hold", "set-auto_clutch", "set-auto_ibis", "set-momentary_gears", "s-go-keys",
+            "s-keys", "set-steering_linear", "set-old_steering", "set-red_steer_spd", "s-mouse", "s-stick", "set-steer_center", "set-mouse_right_off", "set-blinker_cancel", "set-brake_hold", "set-auto_clutch", "set-auto_ibis", "set-momentary_gears", "s-go-keys",
             "s-wrange", "s-wlock", "s-pedt", "s-pedb", "set-ff_enabled", "set-ff_invert", "s-wreset", "s-go-pads",
         ];
         let mut camera = vec![

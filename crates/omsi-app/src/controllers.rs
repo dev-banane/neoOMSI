@@ -87,6 +87,7 @@ impl DeviceCfg {
     }
 }
 
+/// A `centre` near either end (a pedal at rest) is ignored, so a pedal maps linearly.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct AxisCal {
     pub(crate) min: f32,
@@ -96,6 +97,7 @@ pub(crate) struct AxisCal {
 }
 
 impl AxisCal {
+    /// Less travel than this means the axis wasn't moved during calibration.
     pub(crate) const MIN_SPAN: f32 = 0.2;
 
     pub(crate) fn apply(&self, v: f32) -> f32 {
@@ -282,13 +284,20 @@ pub(crate) fn look_axis(v: f32) -> f32 {
 /// as the wheel's place, the smallest movement turned the wheel a long way and a push to
 /// the side was the full lock at any speed. As the bus games take it: a gentler curve
 /// (squared), and less of the lock the faster the bus goes (the whole of it standing, a
-/// third of it at 50 km/h, a fifth at 90 km/h).
-pub fn gamepad_steering(x: f32, kmh: f32) -> f32 {
+/// third of it at 50 km/h, a fifth at 90 km/h). Full deflection stays full lock at every
+/// `sens`, so parking still works.
+pub fn gamepad_steering(x: f32, kmh: f32, sens: f32) -> f32 {
     let x = x.clamp(-1.0, 1.0);
-    let curve = x * x.abs();
+    let curve = x.signum() * x.abs().powf(2.0 - sens.clamp(0.1, 2.0).log2());
     let reach = 1.0 / (1.0 + (kmh.abs() - 10.0).max(0.0) / 20.0);
     curve * reach
 }
+
+pub fn gamepad_steering_time(sens: f32) -> f32 {
+    1.2 / sens.clamp(0.1, 2.0).sqrt()
+}
+
+pub(crate) const CENTRE_SNAP: f32 = 0.03;
 
 pub(crate) const ASSIGNABLE: [(&str, &str); 4] = [("steering", "Steering"), ("throttle", "Throttle"), ("brake", "Brake"), ("clutch", "Clutch")];
 
@@ -341,10 +350,9 @@ impl PadDefaults {
 }
 
 fn stick_steers(current: Option<f32>, set_up: bool, x: f32) -> bool {
-    const IDLE: f32 = 0.03;
     match current {
         None => true,
-        Some(s) => !set_up && (x.abs() > s.abs() || s.abs() < IDLE),
+        Some(s) => !set_up && (x.abs() > s.abs() || s.abs() < CENTRE_SNAP),
     }
 }
 
@@ -702,6 +710,7 @@ pub struct Controllers {
     /// Devices switched off (Settings: `ctrl_off`): not read at all.
     pub disabled: Vec<String>,
     pub sources: [Option<String>; 4],
+    pub centre: bool,
     /// Force feedback the other way round (Settings: `ff_invert`).
     pub ff_invert: bool,
     /// Force feedback and rumble switched on (Settings: `ff_enabled`).
@@ -756,7 +765,7 @@ impl Controllers {
         for c in devices.connected() {
             log::info!("game controller: {} ({})", c.name, if cfg.iter().any(|d| names_match(&d.name, &c.name)) { "set up in gamectrler.cfg" } else if c.gamepad { "as a gamepad" } else { "not set up: its X axis steers" });
         }
-        Controllers { settled: Vec::new(), devices, focused: true, cfg, deadzone: 0.0, pedal_throttle: 1.0, pedal_brake: 1.0, disabled: Vec::new(), sources: Default::default(), ff_invert: false, ff_enabled: true, steer_gain: 1.0, enabled: true, actions: Vec::new(), announced: Vec::new(), notice: None, steer: None, ff_t: 0.0, ff_lateral: 0.0, ff_bump: 0.0, ff_bump_age: 0.0, ff_source_logged: None, rumble: None, #[cfg(all(target_os = "linux", target_pointer_width = "64"))] wheel: None, #[cfg(all(target_os = "linux", target_pointer_width = "64"))] wheel_tried: None }
+        Controllers { settled: Vec::new(), devices, focused: true, cfg, deadzone: 0.0, pedal_throttle: 1.0, pedal_brake: 1.0, disabled: Vec::new(), sources: Default::default(), centre: true, ff_invert: false, ff_enabled: true, steer_gain: 1.0, enabled: true, actions: Vec::new(), announced: Vec::new(), notice: None, steer: None, ff_t: 0.0, ff_lateral: 0.0, ff_bump: 0.0, ff_bump_age: 0.0, ff_source_logged: None, rumble: None, #[cfg(all(target_os = "linux", target_pointer_width = "64"))] wheel: None, #[cfg(all(target_os = "linux", target_pointer_width = "64"))] wheel_tried: None }
     }
 
     /// A wheel or joystick steers the bus (then the arrow keys look around, as in OMSI:
@@ -936,6 +945,9 @@ impl Controllers {
                     out.look = [look_axis(pad.value(Axis::RightStickX)), look_axis(-pad.value(Axis::RightStickY))];
                 }
             }
+        }
+        if self.centre && out.steering.is_some_and(|s| s.abs() < CENTRE_SNAP) {
+            out.steering = Some(0.0);
         }
         let before = self.steer.as_ref().filter(|s| steer.as_ref().is_some_and(|n| n.0 == s.0)).map(|s| s.1);
         self.steer = steer.map(|(name, v, ff)| (name, v, before.unwrap_or(v), ff));
@@ -1437,6 +1449,21 @@ mod tests {
         assert!(super::stick_steers(Some(0.02), false, 0.0));
         assert!(!super::stick_steers(Some(0.8), false, 0.3));
         assert!(!super::stick_steers(Some(0.0), true, 1.0));
+    }
+
+    #[test]
+    fn a_gentler_stick_turns_less_for_a_small_push_but_still_reaches_full_lock() {
+        use super::{gamepad_steering, gamepad_steering_time};
+        assert!((gamepad_steering(0.5, 0.0, 1.0) - 0.25).abs() < 1e-6);
+        let half = gamepad_steering(0.5, 0.0, 0.25);
+        assert!((half - 0.0625).abs() < 1e-6, "{half}");
+        assert_eq!(gamepad_steering(-0.5, 0.0, 0.25), -half);
+        for sens in [0.1, 0.25, 0.7, 1.0, 2.0] {
+            assert!((gamepad_steering(1.0, 0.0, sens) - 1.0).abs() < 1e-6);
+            assert!((gamepad_steering(-1.0, 0.0, sens) + 1.0).abs() < 1e-6);
+        }
+        assert!((gamepad_steering_time(1.0) - 1.2).abs() < 1e-6);
+        assert!((gamepad_steering_time(0.25) - 2.4).abs() < 1e-6);
     }
 
     #[test]

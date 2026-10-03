@@ -36,6 +36,8 @@ pub(super) fn steps_of(verb: &str) -> Option<Vec<f32>> {
         "steer_look_response" => (1..=20).map(|v| v as f32 * 0.05).collect(),
         "pedal_t" | "pedal_b" => PEDAL.to_vec(),
         "mouse_sens" => (10..=300).map(|v| v as f32 / 100.0).collect(),
+        "stick_sens" => (2..=40).map(|v| v as f32 * 0.05).collect(),
+        "ctrl_deadzone" => (0..=30).map(|v| v as f32 / 100.0).collect(),
         "look_sens" => (2..=40).map(|v| v as f32 * 0.05).collect(),
         "seat" => (-50..=50).map(|v| v as f32 / 100.0).collect(),
         "hour" => (0..24).map(|v| v as f32).collect(),
@@ -133,6 +135,8 @@ pub(super) fn option_now(app: &App, verb: &str, arg: &str) -> Option<f32> {
         "pedal_t" => s.pedal_throttle,
         "pedal_b" => s.pedal_brake,
         "mouse_sens" => s.mouse_sens,
+        "stick_sens" => s.stick_sens,
+        "ctrl_deadzone" => s.ctrl_deadzone,
         "look_sens" => s.look_sens,
         "ui_scale" => s.ui_scale,
         "ui_opacity" => s.ui_opacity,
@@ -213,6 +217,14 @@ pub(super) fn option_set(app: &mut App, verb: &str, arg: &str, v: f32) -> Option
         "mouse_sens" => {
             app.settings.mouse_sens = (v * 100.0).round() / 100.0;
             Some(("mouse_sens", app.settings.mouse_sens.to_string()))
+        }
+        "stick_sens" => {
+            app.settings.stick_sens = (v * 100.0).round() / 100.0;
+            Some(("stick_sens", app.settings.stick_sens.to_string()))
+        }
+        "ctrl_deadzone" => {
+            app.settings.ctrl_deadzone = (v * 100.0).round() / 100.0;
+            Some(("ctrl_deadzone", app.settings.ctrl_deadzone.to_string()))
         }
         "ui_scale" => {
             app.settings.ui_scale = (v * 100.0).round() / 100.0;
@@ -323,6 +335,7 @@ pub(super) fn toggle_now(app: &App, id: &str) -> Option<bool> {
         "mouse" => app.mouse_drive,
         "mouse_right" => s.mouse_right_off,
         "blinker_cancel" => s.blinker_cancel,
+        "steer_center" => s.steer_center,
         "fps" => s.show_fps,
         "auto_ibis" => s.auto_ibis,
         "time_sync" => s.time_sync,
@@ -454,6 +467,10 @@ pub(super) fn toggle_set(app: &mut App, id: &str, on: bool) -> Option<(&'static 
             app.mouse_steer = (app.player.as_ref().map(|p| p.vehicle.physics.controls.steering).unwrap_or(0.0), 1.0);
             app.mouse_pedals = app.player.as_ref().map(|p| (p.vehicle.physics.controls.throttle, p.vehicle.physics.controls.brake)).unwrap_or((0.0, 0.0));
             None
+        }
+        "steer_center" => {
+            app.settings.steer_center = on;
+            Some(("steer_center", bit))
         }
         "blinker_cancel" => {
             app.settings.blinker_cancel = on;
