@@ -75,6 +75,12 @@ pub(crate) struct DeviceCfg {
     pub(crate) ff_invert: Option<bool>,
 }
 
+impl DeviceCfg {
+    pub(crate) fn steers(&self) -> bool {
+        self.axes.iter().any(|a| matches!(a, Some((Func::Steering, _))))
+    }
+}
+
 /// The `gamectrler.cfg` in use: the content folder's (written by the launcher) before
 /// OMSI 2's own.
 pub(crate) fn cfg_path(root: &Path) -> std::path::PathBuf {
@@ -205,6 +211,14 @@ pub fn gamepad_steering(x: f32, kmh: f32) -> f32 {
     let curve = x * x.abs();
     let reach = 1.0 / (1.0 + (kmh.abs() - 10.0).max(0.0) / 20.0);
     curve * reach
+}
+
+fn stick_steers(current: Option<f32>, set_up: bool, x: f32) -> bool {
+    const IDLE: f32 = 0.03;
+    match current {
+        None => true,
+        Some(s) => !set_up && (x.abs() > s.abs() || s.abs() < IDLE),
+    }
 }
 
 /// Bus steering follows its characteristic, dead zone and range; feedback follows the physical
@@ -643,6 +657,7 @@ impl Controllers {
         let mut pads: Vec<(Option<&DeviceCfg>, Connected)> = self.devices.connected().into_iter().filter(|c| !off.iter().any(|d| names_match(d, &c.name))).map(|c| (find_device_cfg(&self.cfg, &c.name), c)).collect();
         pads.sort_by_key(|(cfg, _)| cfg.is_none());
         let mut steer: Option<(String, f32, bool)> = None;
+        let mut steering_set_up = false;
         let dz = self.deadzone.clamp(0.0, 0.3);
         for (cfg, c) in pads {
             if let Some((k, v)) = c.axes.iter().find(|(_, v)| v.abs() > 0.5) {
@@ -659,6 +674,7 @@ impl Controllers {
                         if matches!(f, Func::Steering) {
                             let (steering, position) = wheel_steering(v, inverted, d.axis_flags[k], dz, self.steer_gain);
                             set(&mut out.steering, steering);
+                            steering_set_up = true;
                             if steer.is_none() {
                                 steer = Some((c.name.clone(), position, c.ff));
                             }
@@ -729,7 +745,8 @@ impl Controllers {
                 // for the system's own layout: with the file naming it, nobody read it, and
                 // its triggers were no pedals, #171)
                 let xinput = cfg!(windows) && xinput_name(pad.name());
-                if pad.mapping_source() == gilrs::MappingSource::None || (!xinput && self.cfg.iter().any(|d| names_match(&d.name, pad.name()))) {
+                // A pad set up without a steering axis would otherwise not steer at all.
+                if pad.mapping_source() == gilrs::MappingSource::None || (!xinput && self.cfg.iter().any(|d| names_match(&d.name, pad.name()) && d.steers())) {
                     continue;
                 }
                 #[cfg(target_os = "macos")]
@@ -740,17 +757,18 @@ impl Controllers {
                     continue;
                 }
                 let x = pad.value(Axis::LeftStickX);
-                let dead = |v: f32| if v.abs() < 0.08 { 0.0 } else { v };
+                let x = if x.abs() < 0.08 { 0.0 } else { x };
+                let steers = stick_steers(out.steering, steering_set_up, x);
                 // (said once per pad: the stick moved, and whether it steers - a report of
                 // "the sticks do nothing" then says which way the pad came in)
                 if x.abs() > 0.5 && !self.announced.iter().any(|n| n == &format!("stick:{}", pad.name())) {
                     self.announced.push(format!("stick:{}", pad.name()));
-                    log::info!("game controller {}: left stick {x:.2}, steers: {} (layout {:?})", pad.name(), out.steering.is_none(), pad.mapping_source());
+                    log::info!("game controller {}: left stick {x:.2}, steers: {steers} (layout {:?})", pad.name(), pad.mapping_source());
                 }
                 let rt = pad.button_data(gilrs::Button::RightTrigger2).map(|d| d.value()).unwrap_or(0.0);
                 let lt = pad.button_data(gilrs::Button::LeftTrigger2).map(|d| d.value()).unwrap_or(0.0);
-                if out.steering.is_none() {
-                    out.steering = Some(dead(x));
+                if steers {
+                    out.steering = Some(x);
                     out.stick = true;
                 }
                 out.throttle.get_or_insert(crate::settings::pedal_curve(rt, self.pedal_throttle));
@@ -1236,6 +1254,26 @@ mod axis_shape_tests {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn an_idle_device_nobody_set_up_does_not_hold_the_sticks_steering() {
+        assert!(super::stick_steers(None, false, 0.0));
+        assert!(super::stick_steers(Some(0.0), false, -0.6));
+        assert!(super::stick_steers(Some(0.0), false, 0.0));
+        assert!(super::stick_steers(Some(0.02), false, 0.0));
+        assert!(!super::stick_steers(Some(0.8), false, 0.3));
+        assert!(!super::stick_steers(Some(0.0), true, 1.0));
+    }
+
+    #[test]
+    fn a_pad_set_up_without_a_steering_axis_does_not_steer_by_the_file() {
+        let mut d = super::DeviceCfg::default();
+        d.axes[5] = Some((super::Func::Throttle, false));
+        d.axes[2] = Some((super::Func::Brake, false));
+        assert!(!d.steers());
+        d.axes[0] = Some((super::Func::Steering, true));
+        assert!(d.steers());
+    }
 
     #[test]
     fn look_axes_are_kept_in_the_file_and_rest_at_the_centre() {
