@@ -2,8 +2,7 @@
 
 Builds a content pack of realistic passengers from the
 [Microsoft Rocketbox](https://github.com/microsoft/Microsoft-Rocketbox) avatars (MIT): every
-adult, child and profession except the firefighters in turnout gear and the soldiers in
-combat kit.
+adult and child, and the professions whose work clothes a bus passenger might wear.
 
 The pack is plain OMSI content (`.hum`, `.cfg`, `.o3d`, DDS textures) on the stock 13-bone
 rig, with three LOD levels per figure, so the engine treats the new people like the old ones.
@@ -14,7 +13,7 @@ rig, with three LOD levels per figure, so the engine treats the new people like 
   the slot is drawn (a map's `humans.txt` names `man01.hum`), the engine picks the slot's own
   figure or one of these, so a map keeps its mix of men, women and children.
 - `weights`: how often an alternate comes up against its slot's own figure (1), by avatar
-  name prefix, written to the `.hum` as `[neo_weight]`. Uniforms come up less often.
+  name prefix, written to the `.hum` as `[neo_weight]`. Work clothes come up less often.
 
 Needs Python 3 with Pillow 11+ and Blender 4.x.
 

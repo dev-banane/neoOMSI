@@ -252,6 +252,50 @@ fn report(t: &HumanType) {
             }
         }
     }
+    omsi_walk_sink(t);
+}
+
+/// How far heel and toe tip go below the floor over Omsi.exe's walk cycle, with the feet
+/// stiff on the shins and as `slots_from_omsi` grounds them.
+fn omsi_walk_sink(t: &HumanType) {
+    use omsi_sim::human::slots_from_omsi;
+    use omsi_sim::human_omsi::{AnimInput, OmsiAnim};
+    let r = &t.rig;
+    for speed in [0.8f32, 1.1, 1.4] {
+        let mut anim = OmsiAnim::default();
+        let (mut stiff, mut grounded, mut hover) = (0.0f32, 0.0f32, 0.0f32);
+        for _ in 0..240 {
+            let inp = AnimInput {
+                kind: 1,
+                speed,
+                moved: speed / 60.0,
+                room_height: 50.0,
+                dt_ms: 1000.0 / 60.0,
+                ..Default::default()
+            };
+            anim.advance(&t.omsi, &inp);
+            let b = anim.bones(&t.omsi);
+            let slots = slots_from_omsi(&b, r, true);
+            let mut lowest = f32::MAX;
+            for side in 0..2 {
+                let a = r.ankle[side];
+                for y in [r.heel, r.toe] {
+                    let p = a + Vec3::new(0.0, y, -r.ankle_h);
+                    stiff = stiff.max(r.sole - b[2 + side].transform_point3(p).z);
+                    let z = slots[13 + side].transform_point3(p).z;
+                    grounded = grounded.max(r.sole - z);
+                    lowest = lowest.min(z);
+                }
+            }
+            hover = hover.max(lowest - r.sole);
+        }
+        println!(
+            "   omsi walk {speed}: sinks {:.1} cm with stiff feet, {:.1} cm grounded, lower foot up to {:.1} cm above the floor",
+            stiff * 100.0,
+            grounded * 100.0,
+            hover * 100.0
+        );
+    }
 }
 
 /// Ranges of the joints over a few seconds of each activity.

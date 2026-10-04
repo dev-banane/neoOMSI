@@ -1267,6 +1267,9 @@ pub struct Person {
     skin_bones: Option<[glam::Affine3A; omsi_sim::human::SLOTS]>,
     fresh_levels: u32,
     changed_levels: u32,
+    /// The `[LOD]` level shown: the only one whose meshes are visible, so the mirrors and
+    /// the shadows draw the posed level too and never one still in the file's T-pose.
+    level: usize,
     /// Interior light of the bus the person is in (0 outside).
     interior: f32,
     /// The interior light as drawn: it follows `interior` over a moment (stepping through
@@ -2198,7 +2201,7 @@ impl Humans {
             if let Some((id, inst)) = self.spare.get_mut(&key).and_then(|v| v.pop()) {
                 self.hidden.retain(|h| *h != inst);
                 renderer.set_transform(scene, inst, position, Mat4::IDENTITY);
-                renderer.set_params(scene, inst, &[], true, &[]);
+                renderer.set_params(scene, inst, &[], level == 0, &[]);
                 meshes.push((id, inst));
                 continue;
             }
@@ -2246,10 +2249,9 @@ impl Humans {
             let mats = self.gpu_materials[&key].clone();
             let id = renderer.add_mesh(scene, &hm.data);
             let inst = renderer.add_instance(scene, id, position, Mat4::IDENTITY, mats);
-            if ty.levels.len() > 1 {
-                let (min, max) = ty.levels[level];
-                renderer.set_lod_range(scene, inst, min, max);
-                renderer.set_object_culling(scene, inst, ty.radius(), 1.0, false);
+            // (the level is chosen in `sync`, which shows the one it has posed)
+            if level > 0 {
+                renderer.set_params(scene, inst, &[], false, &[]);
             }
             meshes.push((id, inst));
         }
@@ -2293,6 +2295,7 @@ impl Humans {
             skin_bones: None,
             fresh_levels: 0,
             changed_levels: 0,
+            level: 0,
             interior: 0.0,
             lit: 0.0,
             tilt: Mat4::IDENTITY,
@@ -4870,6 +4873,7 @@ impl Humans {
         self.last_sync = self.time;
         let mut due: Vec<bool> = Vec::with_capacity(self.people.len());
         let mut wanted: Vec<u32> = Vec::with_capacity(self.people.len());
+        let mut chosen: Vec<usize> = Vec::with_capacity(self.people.len());
         let fov_y = eye.map_or(1.0, |e| e.fov_y);
         for (k, p) in self.people.iter_mut().enumerate() {
             p.since_posed = p.since_posed.saturating_add(1);
@@ -4883,17 +4887,12 @@ impl Humans {
                 } else {
                     (2.0 * r / (od * fov_y)) as f32
                 };
-                let want = p.ty.levels_at(size);
-                // (a mirror measures its own size and may draw a finer level: near enough
-                // for one to show them, the finer levels are kept posed as well)
-                if dist < 30.0 {
-                    want | ((want & want.wrapping_neg()) - 1)
-                } else {
-                    want
-                }
+                p.ty.level_at(size, Some(p.level))
             } else {
-                1
+                0
             };
+            chosen.push(want);
+            let want = 1u32 << want;
             wanted.push(want);
             let visible = match eye {
                 Some(e) => dist < 4.0 || d.dot(e.fwd) / dist.max(1e-3) > e.cos_half - 0.15,
@@ -4942,7 +4941,9 @@ impl Humans {
                 ..
             } = p;
             *changed_levels = 0;
-            let bones = omsi_sim::human::slots_from_omsi(&anim.bones(&ty.omsi));
+            // (seated the thighs are well forward: the feet stay where the seat puts them)
+            let standing = anim.angles[0].abs() < 45.0 && anim.angles[1].abs() < 45.0;
+            let bones = omsi_sim::human::slots_from_omsi(&anim.bones(&ty.omsi), &ty.rig, standing);
             if bones.iter().any(|b| !b.is_finite()) && !skins.is_empty() {
                 // keep the last good mesh (the rest pose would be the file's T-pose)
                 return;
@@ -4983,7 +4984,7 @@ impl Humans {
                 .for_each(|(p, (_, want))| pose_one(p, *want));
         }
         let upload = std::time::Instant::now();
-        for (p, &go) in self.people.iter_mut().zip(&due) {
+        for ((p, &go), &level) in self.people.iter_mut().zip(&due).zip(&chosen) {
             if go {
                 for (k, (id, _)) in p.meshes.iter().enumerate() {
                     let (level, m) = p.ty.mesh_at(k);
@@ -4993,6 +4994,16 @@ impl Humans {
                         }
                     }
                 }
+            }
+            if level != p.level && p.fresh_levels & (1 << level) != 0 {
+                p.level = level;
+                let hide = self.avatar_hidden.get(&p.id).copied().unwrap_or(false);
+                for (k, (_, inst)) in p.meshes.iter().enumerate() {
+                    let shown = p.ty.mesh_at(k).0 == level && !hide;
+                    renderer.set_params(scene, *inst, &[], shown, &[]);
+                }
+            }
+            if go {
                 p.skinned = true;
                 p.since_posed = 0;
                 p.posed_at = (p.position, p.heading);
@@ -5038,8 +5049,9 @@ impl Humans {
             if let Some(hide) = self.avatar_hidden.get_mut(&p.id) {
                 // (the first-person view: the avatar's own body out of the picture; set
                 // every frame, the posing would show it again)
-                for (_, inst) in &p.meshes {
-                    renderer.set_params(scene, *inst, &[], !*hide, &[]);
+                for (k, (_, inst)) in p.meshes.iter().enumerate() {
+                    let shown = p.ty.mesh_at(k).0 == p.level && !*hide;
+                    renderer.set_params(scene, *inst, &[], shown, &[]);
                 }
             }
             if let Some(t) = self.trace.as_mut() {

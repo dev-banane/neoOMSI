@@ -24,87 +24,62 @@
       "Adults/Male_Adult_17",
       "Professions/Business_Male_01",
       "Professions/Construction_Male_02",
-      "Professions/Gardener_Male_01",
-      "Professions/Police_Male_02",
-      "Professions/Sports_Male_02"
+      "Professions/Gardener_Male_01"
     ],
     "Humans/Other/man02.hum": [
       "Adults/Male_Adult_10",
       "Adults/Male_Adult_18",
       "Professions/Business_Male_02",
-      "Professions/Construction_Male_03",
-      "Professions/Medical_Male_01",
-      "Professions/Police_Male_03",
-      "Professions/Sports_Male_03"
+      "Professions/Construction_Male_03"
     ],
     "Humans/Other/man03.hum": [
       "Adults/Male_Adult_11",
       "Adults/Male_Adult_19",
       "Professions/Business_Male_03",
-      "Professions/Construction_Male_04",
-      "Professions/Medical_Male_02",
-      "Professions/Police_Male_04",
-      "Professions/Sports_Male_04"
+      "Professions/Construction_Male_04"
     ],
     "Humans/Other/man04.hum": [
       "Adults/Male_Adult_12",
       "Adults/Male_Adult_20",
       "Professions/Business_Male_04",
       "Professions/Construction_Male_05",
-      "Professions/Medical_Male_03",
-      "Professions/Police_Male_05",
       "Professions/Wood_Male_01"
     ],
     "Humans/Other/man05.hum": [
       "Adults/Male_Adult_13",
       "Adults/Male_Adult_21",
       "Professions/Business_Male_05",
-      "Professions/Construction_Male_06",
-      "Professions/Medical_Male_04",
-      "Professions/Pilot_Male_01",
-      "Professions/Police_Male_06"
+      "Professions/Construction_Male_06"
     ],
     "Humans/aXYZ/man01.hum": [
       "Adults/Male_Adult_14",
       "Professions/Business_Male_06",
-      "Professions/Construction_Male_07",
-      "Professions/Medical_Male_05",
-      "Professions/Pilot_Male_02",
-      "Professions/Police_Male_07"
+      "Professions/Construction_Male_07"
     ],
     "Humans/aXYZ/man02.hum": [
       "Adults/Male_Adult_15",
       "Professions/Business_Male_07",
-      "Professions/Construction_Male_08",
-      "Professions/Pilot_Male_03",
-      "Professions/Security_Male_01"
+      "Professions/Construction_Male_08"
     ],
     "Humans/Krummenaab/man04.hum": [
       "Adults/Male_Adult_16",
       "Professions/Construction_Male_01",
-      "Professions/Delivery_Male_01",
-      "Professions/Police_Male_01",
-      "Professions/Sports_Male_01"
+      "Professions/Delivery_Male_01"
     ],
     "Humans/Other/woman02.hum": [
       "Adults/Female_Adult_08",
       "Adults/Female_Adult_15",
-      "Professions/Business_Female_01",
-      "Professions/Medical_Female_02",
-      "Professions/Security_Female_01"
+      "Professions/Business_Female_01"
     ],
     "Humans/Other/woman03.hum": [
       "Adults/Female_Adult_09",
       "Adults/Female_Adult_16",
-      "Professions/Business_Female_02",
-      "Professions/Medical_Female_03",
-      "Professions/Sports_Female_01"
+      "Professions/Business_Female_02"
     ],
     "Humans/Other/woman04.hum": [
       "Adults/Female_Adult_10",
       "Adults/Female_Adult_17",
-      "Professions/Business_Female_03",
-      "Professions/Sports_Female_02"
+      "Professions/Business_Female_03"
     ],
     "Humans/aXYZ/woman01.hum": [
       "Adults/Female_Adult_11",
@@ -113,19 +88,14 @@
     ],
     "Humans/aXYZ/woman02.hum": [
       "Adults/Female_Adult_12",
-      "Adults/Female_Party_02",
-      "Professions/Chef_Female_01",
-      "Professions/Pilot_Female_01"
+      "Adults/Female_Party_02"
     ],
     "Humans/aXYZ/woman03.hum": [
       "Adults/Female_Adult_13",
-      "Professions/Construction_Female_01",
-      "Professions/Pilot_Female_02"
+      "Professions/Construction_Female_01"
     ],
     "Humans/aXYZ/MeCaT07W28.hum": [
-      "Adults/Female_Adult_14",
-      "Professions/Medical_Female_01",
-      "Professions/Police_Female_01"
+      "Adults/Female_Adult_14"
     ],
     "Humans/aXYZ/MeCaT04B01.hum": [
       "Children/Male_Child_02"
@@ -136,15 +106,9 @@
   },
   "weights": {
     "Professions/Business": 1.0,
-    "Professions/Construction": 0.5,
-    "Professions/Delivery": 0.5,
+    "Professions/Wood": 1.0,
+    "Professions/Delivery": 0.6,
     "Professions/Gardener": 0.5,
-    "Professions/Sports": 0.5,
-    "Professions/Chef": 0.4,
-    "Professions/Medical": 0.4,
-    "Professions/Wood": 0.3,
-    "Professions/Security": 0.3,
-    "Professions/Pilot": 0.2,
-    "Professions/Police": 0.2
+    "Professions/Construction": 0.5
   }
 }

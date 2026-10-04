@@ -571,18 +571,10 @@ impl HumanType {
         self.rig.head_top.max(0.5)
     }
 
-    /// The levels (bit per level) that may be drawn at screen size `size`: the renderer
-    /// holds an object's size while it changes less than 6 %, so the neighbouring level
-    /// is included near a boundary.
-    pub fn levels_at(&self, size: f32) -> u32 {
-        let (lo, hi) = (size * 0.9, if size >= f32::MAX / 2.0 { size } else { size * 1.1 });
-        let mut mask = 0;
-        for (l, &(min, max)) in self.levels.iter().enumerate().take(32) {
-            if hi >= min && lo < max {
-                mask |= 1 << l;
-            }
-        }
-        if mask == 0 { 1 } else { mask }
+    /// The level to draw at screen size `size`. `current` is kept until the size is 10 %
+    /// beyond its range, so somebody standing at a boundary does not flicker between two.
+    pub fn level_at(&self, size: f32, current: Option<usize>) -> usize {
+        level_at(&self.levels, size, current)
     }
 
     pub fn texture_dirs(&self, root: &Path) -> Vec<PathBuf> {
@@ -2330,16 +2322,82 @@ fn limit_quat(q: Quat, max: f32) -> Quat {
 }
 
 /// The bone transforms of [`skin`] from Omsi.exe's thirteen bones
-/// ([`crate::human_omsi::OmsiAnim::bones`]): the feet and toes, which the original does not
-/// have, go with the shins they were split off.
-pub fn slots_from_omsi(b: &[Affine3A; crate::human_omsi::BONES]) -> [Affine3A; SLOTS] {
+pub fn slots_from_omsi(
+    b: &[Affine3A; crate::human_omsi::BONES],
+    rig: &Rig,
+    standing: bool,
+) -> [Affine3A; SLOTS] {
+    let sunk = (0..2)
+        .map(|side| rig.sole + rig.ankle_h - b[SHIN[side]].transform_point3(rig.ankle[side]).z)
+        .fold(0.0f32, f32::max);
+    let lift = if standing && sunk < 0.2 {
+        Affine3A::from_translation(Vec3::Z * sunk)
+    } else {
+        Affine3A::IDENTITY
+    };
     let mut out = [Affine3A::IDENTITY; SLOTS];
-    out[..crate::human_omsi::BONES].copy_from_slice(b);
+    for (o, m) in out.iter_mut().zip(b) {
+        *o = lift * *m;
+    }
     for side in 0..2 {
-        out[FOOT[side]] = b[SHIN[side]];
-        out[TOE[side]] = b[SHIN[side]];
+        let shin = out[SHIN[side]];
+        let foot = grounded_foot(&shin, rig, side).unwrap_or(shin);
+        out[FOOT[side]] = foot;
+        out[TOE[side]] = foot;
     }
     out
+}
+
+fn level_at(levels: &[(f32, f32)], size: f32, current: Option<usize>) -> usize {
+    let holds = |(min, max): (f32, f32), margin: f32| {
+        size >= min * (1.0 - margin) && (max >= f32::MAX || size < max * (1.0 + margin))
+    };
+    if let Some(l) = current.filter(|l| levels.get(*l).is_some_and(|r| holds(*r, 0.1))) {
+        return l;
+    }
+    levels.iter().position(|r| holds(*r, 0.0)).unwrap_or(0)
+}
+
+fn grounded_foot(shin: &Affine3A, rig: &Rig, side: usize) -> Option<Affine3A> {
+    let rest = rig.ankle[side];
+    let ankle = shin.transform_point3(rest);
+    let fwd = shin.transform_vector3(Vec3::Y);
+    let flat = Vec2::new(fwd.x, fwd.y).length();
+    if !ankle.is_finite() || flat < 1e-4 {
+        return None;
+    }
+    let natural = fwd.z.atan2(flat);
+    // the lowest of heel and toe tip below the floor at pitch `a` (toes up for a > 0)
+    let sunk = |a: f32| {
+        let (s, c) = a.sin_cos();
+        let heel = rig.heel * s - rig.ankle_h * c;
+        let toe = rig.toe * s - rig.ankle_h * c;
+        rig.sole - (ankle.z + heel.min(toe))
+    };
+    if sunk(natural) <= 0.0 {
+        return None;
+    }
+    let pitch = if sunk(0.0) >= 0.0 {
+        0.0
+    } else {
+        let (mut ok, mut bad) = (0.0f32, natural);
+        for _ in 0..12 {
+            let mid = 0.5 * (ok + bad);
+            if sunk(mid) > 0.0 {
+                bad = mid;
+            } else {
+                ok = mid;
+            }
+        }
+        ok
+    };
+    let yaw = (-fwd.x).atan2(fwd.y);
+    Some(
+        Affine3A::from_translation(ankle)
+            * Affine3A::from_rotation_z(yaw)
+            * Affine3A::from_rotation_x(pitch)
+            * Affine3A::from_translation(-rest),
+    )
 }
 
 /// Deform `mesh` with the bone transforms (linear blend skinning).
@@ -2379,6 +2437,58 @@ pub fn skin(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_level_is_kept_until_the_size_is_well_past_its_range() {
+        let levels = [(0.25, f32::MAX), (0.08, 0.25), (0.0, 0.08)];
+        assert_eq!(level_at(&levels, f32::MAX, None), 0);
+        assert_eq!(level_at(&levels, 0.3, None), 0);
+        assert_eq!(level_at(&levels, 0.1, None), 1);
+        assert_eq!(level_at(&levels, 0.01, None), 2);
+        assert_eq!(level_at(&levels, 0.24, Some(0)), 0);
+        assert_eq!(level_at(&levels, 0.2, Some(0)), 1);
+        assert_eq!(level_at(&levels, 0.26, Some(1)), 1);
+        assert_eq!(level_at(&levels, 0.3, Some(1)), 0);
+        assert_eq!(level_at(&[(0.0, f32::MAX)], 0.5, Some(3)), 0);
+    }
+
+    #[test]
+    fn walking_feet_stay_out_of_the_floor() {
+        let def = Human {
+            links: vec![
+                0.09, 0.0, 0.92, 0.09, -0.03, 0.53, 0.02, 1.17, 0.18, -0.05, 1.43, 0.44, -0.04,
+                1.41, -0.02, 1.55, 0.69, -0.03, 1.43, 0.9, -0.03, 1.43,
+            ],
+            height: 1.78,
+            walk_param: [1.4, 66.0, 1.0, 1.0, 0.0],
+            ..Default::default()
+        };
+        let rig = Rig::measure(&def, &Joints::from_links(&def.links), &[]);
+        let omsi = crate::human_omsi::OmsiRig::new(&def);
+        let mut anim = crate::human_omsi::OmsiAnim::default();
+        let mut worst = 0.0f32;
+        for _ in 0..240 {
+            anim.advance(
+                &omsi,
+                &crate::human_omsi::AnimInput {
+                    kind: 1,
+                    speed: 1.3,
+                    moved: 1.3 / 60.0,
+                    room_height: 50.0,
+                    dt_ms: 1000.0 / 60.0,
+                    ..Default::default()
+                },
+            );
+            let slots = slots_from_omsi(&anim.bones(&omsi), &rig, true);
+            for side in 0..2 {
+                for y in [rig.heel, rig.toe] {
+                    let p = rig.ankle[side] + Vec3::new(0.0, y, -rig.ankle_h);
+                    worst = worst.max(rig.sole - slots[FOOT[side]].transform_point3(p).z);
+                }
+            }
+        }
+        assert!(worst < 0.005, "a foot sank {:.1} cm into the floor", worst * 100.0);
+    }
 
     #[test]
     fn standard_bone_names_have_engine_ids() {
