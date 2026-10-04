@@ -417,7 +417,7 @@ impl App {
                 d.hide(r, scene);
             }
             if let Some(h) = self.humans.as_mut() {
-                h.evict(BusId::Player, &w);
+                h.evict(BusId::Player);
             }
             w.release_vehicle(r, scene, p.render);
             for t in p.trailer_renders {

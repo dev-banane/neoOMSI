@@ -100,9 +100,6 @@ pub(crate) struct Player {
     pub(crate) startup_at: Option<std::time::Instant>,
     /// The ticket key was pressed this frame (sell the requested ticket).
     pub(crate) give_ticket: bool,
-    /// OMSI's `change_give` / `change_take` keys: hand the passenger
-    /// at the desk all the change owed at once / take back what lies on the change tray.
-    pub(crate) give_change: bool,
     /// Parts at the end of the train coupled by hand (they can be uncoupled; an articulated
     /// bus's own rear section cannot).
     pub(crate) hand_coupled: usize,
@@ -729,12 +726,8 @@ impl Player {
             return true;
         }
         if name.eq_ignore_ascii_case("change_give") || name.eq_ignore_ascii_case("change_take") {
-            if pressed {
-                if name.eq_ignore_ascii_case("change_give") {
-                    self.give_change = true;
-                } else {
-                    self.take_change = true;
-                }
+            if pressed && name.eq_ignore_ascii_case("change_take") {
+                self.take_change = true;
             }
             // the bus's own script may know the key too (a change machine)
             self.vehicle.trigger(&format!("{name}{suffix}"));

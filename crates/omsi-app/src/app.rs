@@ -852,7 +852,7 @@ impl App {
                     if let Some(p) = self.player.as_ref() {
                         if self.args.riders > 0 {
                             let centre = p.vehicle.position;
-                            h.populate(&w, &renderer, &mut scene, centre);
+                            h.populate(&w, centre);
                             h.seed_riders(self.args.riders, &p.vehicle, &w, &renderer, &mut scene);
                         }
                     }

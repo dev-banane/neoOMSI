@@ -1,23 +1,6 @@
-//! Humans (`.hum`): skinned models posed procedurally from the joint positions of the
-//! `[links]` block, like the original's `mc_human`. Bones are addressed by the engine ids
-//! given by `[setbone]` (-2 … -14): thighs, shins, upper arms, forearms, hip, torso, head, hands.
-//!
-//! OMSI ships no animation clips, so every pose is made here. Every stock and add-on model
-//! is stored in a T-pose (arms straight out at shoulder height) with the feet part of the
-//! shin bones; the rig is measured from the `[links]` joints and the mesh itself (where the
-//! soles, heels, toes and ankles are), and the feet get a bone of their own split off the
-//! shins so that they can stay flat on the floor, strike with the heel and push off with
-//! the toes.
-//!
-//! [`Pose`] is the per-person animation state, advanced every frame by [`Pose::advance`]
-//! from a [`PoseInput`] (where the person stands, how fast they move, whether they sit,
-//! pay, hold on or look at something); [`Pose::bones`] turns it into bone transforms and
-//! [`skin`] deforms a mesh with them. Walking is a speed-driven gait with planted feet: a
-//! foot on the floor stays where it was put (in the frame of the floor it stands on - the
-//! ground or a bus) and the legs reach it by two-bone IK, so a stride always matches the
-//! ground speed and nothing slides; the swinging foot flies to where the body will be when
-//! it lands. The same stepping carries standing people through turns and shuffles, and the
-//! arms reach the cash desk or a handrail by IK as well.
+//! `.hum` people posed procedurally from their `[links]` joints: OMSI ships no clips. The
+//! models are stored in a T-pose with the feet part of the shins; the feet get bones of their
+//! own here, so that they can stay flat, strike with the heel and push off with the toes.
 
 use anyhow::{Context, Result};
 use glam::{Affine3A, DVec2, DVec3, Mat3A, Quat, Vec2, Vec3, Vec3A};
@@ -27,7 +10,6 @@ use omsi_model::Model;
 use std::f32::consts::{PI, TAU};
 use std::path::{Path, PathBuf};
 
-/// Engine bone ids of `[setbone]`.
 pub const BONE_OS_L: i32 = -2;
 pub const BONE_OS_R: i32 = -3;
 pub const BONE_US_L: i32 = -4;
@@ -42,8 +24,7 @@ pub const BONE_HEAD: i32 = -12;
 pub const BONE_HAND_L: i32 = -13;
 pub const BONE_HAND_R: i32 = -14;
 
-/// Bone transform slots: the thirteen engine bones (id -2 … -14 → slot 0 … 12), the two
-/// feet split off the shins and the toes split off the feet.
+/// The thirteen engine bones (id -2 … -14 as slot 0 … 12), then the feet and the toes.
 pub const SLOTS: usize = 17;
 const THIGH: [usize; 2] = [0, 1];
 const SHIN: [usize; 2] = [2, 3];
@@ -58,7 +39,6 @@ const TOE: [usize; 2] = [15, 16];
 /// Index 0 is the left side, 1 the right; this is the sign of x on that side.
 const SIDE: [f32; 2] = [-1.0, 1.0];
 
-/// The transform slot of an engine bone id.
 pub fn slot_of(id: i32) -> Option<usize> {
     (BONE_HAND_R..=BONE_OS_L)
         .contains(&id)
@@ -84,7 +64,6 @@ fn bone_id_by_name(name: &str) -> Option<i32> {
     }
 }
 
-/// Joint positions in the model frame (x right, y forward, z up) of the right side.
 #[derive(Debug, Clone, Copy)]
 pub struct Joints {
     pub hip: Vec3,
@@ -113,7 +92,6 @@ impl Joints {
     }
 }
 
-/// One vertex's bone influences: up to four (slot, weight) pairs, normalised.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Influence {
     pub n: u8,
@@ -121,23 +99,16 @@ pub struct Influence {
     pub weight: [f32; 4],
 }
 
-/// A skinned mesh of a human with its bone → engine id table.
 pub struct HumanMesh {
     pub data: MeshData,
     pub materials: Vec<omsi_o3d::Material>,
-    /// Per bone of the file: engine id and (vertex, weight) list, as stored.
     pub bones: Vec<(i32, Vec<(u32, f32)>)>,
-    /// Per vertex: the influences the skinning uses. The files list a vertex once per
-    /// face corner (up to 24 times, always with the same weight), so the weights are taken
-    /// once per bone and normalised; vertices near the sole also follow the foot.
+    /// The files list a vertex once per face corner: weights are taken once per bone.
     pub skin: Vec<Influence>,
-    /// Per material: the model's `[matl_alpha]` for it (0 opaque, 1 alpha test, 2 blend) -
-    /// the hair of the stock women and of man02 is an alpha-tested texture.
+    /// `[matl_alpha]`: 0 opaque, 1 alpha test, 2 blend.
     pub alpha: Vec<i32>,
 }
 
-/// The skeleton of one human type, measured from its `[links]` and its mesh. Index 0 of the
-/// pairs is the left side, 1 the right.
 #[derive(Debug, Clone)]
 pub struct Rig {
     pub hip: [Vec3; 2],
@@ -148,34 +119,25 @@ pub struct Rig {
     pub wrist: [Vec3; 2],
     pub waist: Vec3,
     pub neck: Vec3,
-    /// What the head turns about: at the neck's height, under the middle of the head. The
-    /// `[links]` neck point lies at the back of the neck (13 cm behind the middle of the
-    /// head of aXYZ man02), and the head turned about it swung off the collar - a broken
-    /// neck whenever the passenger looked to the side.
+    /// Under the middle of the head: turned about the `[links]` neck point, at the back of the
+    /// neck, a head looking to the side swung off the collar.
     pub head_pivot: Vec3,
-    /// Between the hip joints.
     pub pelvis: Vec3,
     pub thigh: f32,
     pub shin: f32,
     pub upper_arm: f32,
     pub forearm: f32,
-    /// Lowest point of the soles.
     pub sole: f32,
-    /// Ankle joint above the sole.
     pub ankle_h: f32,
-    /// Heel, ball and toe tip along the foot from the ankle (m, heel negative), and the
-    /// height of the toe joint above the sole.
     pub heel: f32,
     pub ball: f32,
     pub toe: f32,
     pub ball_h: f32,
     pub head_top: f32,
-    /// Hip joint above the seat surface when sitting (`[seatheight]` names the rest).
     pub seat_lift: f32,
     /// Size relative to a 1.75 m adult.
     pub scale: f32,
-    /// From `[walk_param]`: the step length at full stride (m) - half the file's first
-    /// line, the stride ({schrittweite}, 1.4 by default) -, the arm swing and the hip sway.
+    /// Half the `[walk_param]` stride.
     pub walk_step: f32,
     pub arm_swing: f32,
     pub hip_sway: f32,
@@ -241,8 +203,7 @@ impl Rig {
             ax = ring.iter().map(|p| p.x).sum::<f32>() / n;
             ay = ring.iter().map(|p| p.y).sum::<f32>() / n;
         }
-        // (a foot shorter than 13 cm - a child, a small model - has the ankle as far back as
-        // it goes: the bounds crossed and the game stopped on the clamp, #138)
+        // (a foot under 13 cm, a child's, has the ankle as far back as it goes: the clamp panicked, #138)
         let ay = ay.clamp(heel_y + 0.03, (toe_y - 0.1).max(heel_y + 0.03));
         let ax = if (ax - knee.x).abs() < 0.1 {
             ax
@@ -326,9 +287,7 @@ impl Rig {
             head_top,
             seat_lift,
             scale,
-            // (line 1 is the stride, hum+0x2d8: Omsi.exe's walk phase 0x626ae8 runs 2.0 per
-            // two strides and sets a foot down at 0.2, 0.7, 1.2 and 1.7, one step per half a
-            // stride; line 2, {upper_arm_beta}, is an angle of the arm)
+            // (line 1 is the stride: Omsi.exe sets a foot down every half stride)
             walk_step: 0.5 * if wp[0] > 0.3 { wp[0] } else { 1.4 },
             arm_swing: if wp[2] > 0.0 {
                 wp[2].clamp(0.2, 1.6)
@@ -343,30 +302,24 @@ impl Rig {
         }
     }
 
-    /// The toe joint of a foot in the rest pose.
     fn ball_joint(&self, side: usize) -> Vec3 {
         self.ankle[side] + Vec3::new(0.0, self.ball, self.ball_h - self.ankle_h)
     }
 
-    /// Hip joint height above the sole with the legs straight.
     pub fn leg(&self) -> f32 {
         self.hip[1].z - self.sole
     }
 
-    /// Where a standing foot rests (the floor point under its ankle), in the model frame.
     fn rest_foot(&self, side: usize) -> Vec3 {
         Vec3::new(self.ankle[side].x, self.ankle[side].y, self.sole)
     }
 
-    /// How far in front of a seat's `[passpos]` (the hip) a person stands before sitting
-    /// down, which is also where the feet stay while seated.
+    /// In front of a seat's hip point: where somebody stands to sit down, and the feet stay.
     pub fn seat_front(&self) -> f32 {
         (self.thigh * 0.85).clamp(0.25, 0.4)
     }
 
-    /// Steps per second at `speed`, as Omsi.exe times the walk (0x626ae8): the stride is
-    /// the full one from 1.2 m/s on and shortens with the speed below that, so the steps
-    /// keep one pace when walking slowly; never with a step longer than the legs allow.
+    /// The full stride from 1.2 m/s on, shorter below, as Omsi.exe times the walk.
     pub fn cadence(&self, speed: f32) -> f32 {
         let v = speed.max(0.05);
         let f = v / (self.walk_step * (v / 1.2).min(1.0));
@@ -376,24 +329,17 @@ impl Rig {
 
 pub struct HumanType {
     pub def: Human,
-    /// The skeleton as Omsi.exe animates it (see [`crate::human_omsi`]).
     pub omsi: crate::human_omsi::OmsiRig,
     pub model: Model,
     pub model_dir: PathBuf,
-    /// The most detailed level's meshes (the rig is measured from them).
     pub meshes: Vec<HumanMesh>,
     /// Per `[LOD]` level, most detailed first: the screen sizes it is drawn at, `min..max`.
     pub levels: Vec<(f32, f32)>,
-    /// The meshes of the levels after the first, with their level.
     pub lower: Vec<(usize, HumanMesh)>,
     pub joints: Joints,
     pub rig: Rig,
-    /// Clothing variants: the `[item]`s of the `.cti` files in the model's `[CTC]` folder
-    /// (the stock people have two or three each), which replace the `[CTCTexture]`
-    /// default. Variant 0 is the default texture, variant n the scheme n-1.
+    /// Variant 0 is the default texture, variant n the `.cti` scheme n-1.
     pub variants: Vec<crate::vehicle::PaintScheme>,
-    /// Folders the textures may lie in besides the usual ones: the `[CTC]` folders and
-    /// the sub-folders of the human's own folder (see [`HumanType::texture_dirs`]).
     extra_dirs: Vec<PathBuf>,
 }
 
@@ -465,14 +411,19 @@ impl HumanType {
             Some(&l) => load_level(l)?,
             None => Vec::new(),
         };
-        let mut levels = vec![(order.first().map_or(0.0, |&l| model.lods[l].min_size), f32::MAX)];
+        let mut levels = vec![(
+            order.first().map_or(0.0, |&l| model.lods[l].min_size),
+            f32::MAX,
+        )];
         let mut lower = Vec::new();
         for &l in order.iter().skip(1) {
             let min = model.lods[l].min_size;
             let posable = match load_level(l) {
                 Ok(ms) => Some(ms).filter(|ms| {
                     !ms.is_empty()
-                        && ms.iter().all(|m| m.bones.iter().any(|(id, _)| slot_of(*id).is_some()))
+                        && ms
+                            .iter()
+                            .all(|m| m.bones.iter().any(|(id, _)| slot_of(*id).is_some()))
                 }),
                 Err(e) => {
                     log::warn!("{}: LOD {l}: {e:#}", path.display());
@@ -488,8 +439,6 @@ impl HumanType {
             levels.push((min, above));
             lower.extend(ms.into_iter().map(|m| (levels.len() - 1, m)));
         }
-        // (the people were never left out by their size before the levels were used: the
-        // least detailed one is drawn however small, the crowd's own culling decides)
         levels.last_mut().unwrap().0 = 0.0;
         let mut joints = Joints::from_links(&def.links);
         fit_leg_joints(&mut joints, &meshes, path);
@@ -497,10 +446,8 @@ impl HumanType {
         for m in meshes.iter_mut().chain(lower.iter_mut().map(|(_, m)| m)) {
             split_feet(m, &rig);
         }
-        // The `[CTC]` folder is relative to the .hum file's folder (`Texture\man02` is
-        // Humans/Other/texture/man02). An add-on that put that folder straight into its own
-        // folder instead (GSPNS: Humans/GSPNS/man02, with the default texture in it too) is
-        // found by the folder's last name; OMSI would show that person untextured.
+        // `[CTC]` is relative to the .hum's folder; an add-on that put it into its own folder (GSPNS)
+        // is found by the folder's last name
         let mut variants = Vec::new();
         let mut extra_dirs: Vec<PathBuf> = Vec::new();
         for c in &model.ctc {
@@ -549,12 +496,10 @@ impl HumanType {
         })
     }
 
-    /// The meshes of every level: the first level's, then the rest.
     pub fn mesh_count(&self) -> usize {
         self.meshes.len() + self.lower.len()
     }
 
-    /// Mesh `k` of [`HumanType::mesh_count`] and its level.
     pub fn mesh_at(&self, k: usize) -> (usize, &HumanMesh) {
         match self.meshes.get(k) {
             Some(m) => (0, m),
@@ -565,14 +510,11 @@ impl HumanType {
         }
     }
 
-    /// The sphere about the feet that holds the whole person, for the screen size the
-    /// levels are chosen by.
     pub fn radius(&self) -> f32 {
         self.rig.head_top.max(0.5)
     }
 
-    /// The level to draw at screen size `size`. `current` is kept until the size is 10 %
-    /// beyond its range, so somebody standing at a boundary does not flicker between two.
+    /// `current` is kept until the size is 10 % beyond its range: no flicker at a boundary.
     pub fn level_at(&self, size: f32, current: Option<usize>) -> usize {
         level_at(&self.levels, size, current)
     }
@@ -595,8 +537,6 @@ impl HumanType {
         dirs
     }
 
-    /// The texture a material shows in clothing variant `variant` (0 = the default):
-    /// the file name and the folder to look in first.
     pub fn variant_texture<'a>(
         &'a self,
         texture: &'a str,
@@ -618,12 +558,8 @@ impl HumanType {
     }
 }
 
-/// A leg joint of `[links]` that lies outside the leg it belongs to is the author's slip:
-/// the GSPNS man04 and man041 give the right hip at x = 0.6 m and the knee at 0.83 m, where
-/// the mesh's thigh is at 0.08. OMSI's rotations about those points hardly show it (the
-/// legs swing about the x axis, along which the error lies), but a leg rig measured from
-/// them reaches its foot 0.8 m out to the side and crosses the legs. Such a coordinate is
-/// taken from the mesh instead: the middle of the limb's vertices at the joint's height.
+/// A leg joint of `[links]` outside its leg (GSPNS man04: the hip at x = 0.6 m) is taken from
+/// the mesh: a leg rig measured from it reached its foot 0.8 m out to the side.
 fn fit_leg_joints(j: &mut Joints, meshes: &[HumanMesh], path: &Path) {
     let verts = |slots: &[usize]| -> Vec<Vec3> {
         let mut out = Vec::new();
@@ -680,8 +616,6 @@ fn fit_leg_joints(j: &mut Joints, meshes: &[HumanMesh], path: &Path) {
     fit(&mut j.knee, &knee_region, "knee");
 }
 
-/// Per-vertex influences from the file's bone lists: each bone counted once per vertex,
-/// the strongest four kept, normalised. A vertex no bone claims follows the torso.
 fn influences(data: &MeshData, bones: &[(i32, Vec<(u32, f32)>)]) -> Vec<Influence> {
     let n = data.positions.len();
     let mut per: Vec<Vec<(u8, f32)>> = vec![Vec::new(); n];
@@ -725,7 +659,6 @@ fn influences(data: &MeshData, bones: &[(i32, Vec<(u32, f32)>)]) -> Vec<Influenc
         .collect()
 }
 
-/// Move `share` of a vertex's weight on slot `from` to slot `to`.
 fn move_weight(inf: &mut Influence, from: usize, to: usize, share: f32) {
     let Some(k) = (0..inf.n as usize).find(|&k| inf.slot[k] as usize == from) else {
         return;
@@ -749,10 +682,7 @@ fn move_weight(inf: &mut Influence, from: usize, to: usize, share: f32) {
     }
 }
 
-/// Give the feet and the toes bones of their own: shin weight below the ankle moves to the
-/// foot and foot weight beyond the ball to the toes, with short blends around the joints.
-/// A skirt is weighted to the thighs in the files and would fly up with a swinging leg like
-/// a lap: its cloth (thigh vertices well outside the leg) follows the hips in part.
+/// A skirt, weighted to the thighs in the files, follows the hips in part: it flew up like a lap.
 fn split_feet(m: &mut HumanMesh, rig: &Rig) {
     let top = rig.sole + rig.ankle_h + 0.025;
     let bottom = rig.sole + rig.ankle_h - 0.03;
@@ -773,53 +703,34 @@ fn split_feet(m: &mut HumanMesh, rig: &Rig) {
     }
 }
 
-/// What a human is doing; drives the pose.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Activity {
     Stand,
     Walk,
     Sit,
-    /// Standing at the cash desk with the right hand held out.
     Pay,
 }
 
-/// What the animation needs to know about a person this frame. Points and directions are
-/// in the person's model frame (x right, y forward, z up, origin at the feet) unless they
-/// say otherwise.
+/// Points and directions in the model frame (x right, y forward, z up, origin at the feet).
 #[derive(Clone, Copy)]
 pub struct PoseInput<'a> {
     pub activity: Activity,
-    /// Where the person stands and which way they face, in the frame of the floor they are
-    /// on (the world, or a bus): position of the feet, heading in degrees (OMSI's, 0 = +y,
-    /// clockwise).
+    /// The feet and the heading (OMSI's: 0 = +y, clockwise) in the frame of the floor they are on.
     pub origin: DVec3,
     pub heading: f64,
-    /// Which floor frame `origin` is in (0 the ground, else a bus); a change keeps the feet
-    /// where they are and re-expresses them in the new frame.
+    /// 0 the ground, else a bus: a change re-expresses the feet in the new frame.
     pub frame: u64,
-    /// Ground velocity in that frame (m/s).
     pub velocity: DVec2,
-    /// While sitting: the seat point (`[passpos]`, the hip) in the model frame.
     pub seat: Option<Vec3>,
-    /// Something to look at.
     pub look: Option<Vec3>,
-    /// Where the right hand reaches (the cash desk).
     pub reach: Option<Vec3>,
-    /// Where both hands hold on (left, right): the driver's hands on the steering wheel.
-    /// Followed as given every frame, no easing (the caller moves them).
+    /// Both hands on the steering wheel, followed as given without easing.
     pub grips: Option<[Vec3; 2]>,
-    /// How each gripping hand lies (left, right): the direction from the wrist to the
-    /// knuckles and the direction the palm faces, model frame. Without it the hand goes on
-    /// straight from the forearm.
     pub grip_frames: Option<[(Vec3, Vec3); 2]>,
-    /// Extra forward lean towards the grips (degrees): a driver whose wheel is far off leans
-    /// to it from the seat instead of leaving it.
+    /// A driver whose wheel is far off leans to it from the seat (degrees).
     pub grip_lean: f32,
-    /// Hold on to a handrail (0 … 1).
     pub hold: f32,
-    /// Acceleration of the floor under the person (a moving bus), model frame, m/s².
     pub sway: Vec2,
-    /// Floor height at a point of the floor frame, when the floor is not flat.
     pub floor: Option<&'a dyn Fn(DVec2) -> Option<f64>>,
 }
 
@@ -844,36 +755,26 @@ impl Default for PoseInput<'_> {
     }
 }
 
-/// One foot: planted on the floor (frame coordinates of the floor point under the ankle
-/// and the foot's heading), or in the air on its way to the next place.
 #[derive(Debug, Clone, Copy)]
 struct Foot {
     planted: bool,
-    /// Floor point under the ankle, and heading (degrees), in the floor frame.
     pos: DVec3,
     yaw: f64,
-    /// Swing: where it left (ankle position and pitch at lift-off) and where it goes.
     from_ankle: DVec3,
     from_yaw: f64,
     from_pitch: f32,
     from_floor: f64,
     to: DVec3,
     to_yaw: f64,
-    /// Floor height sampled at `to` (and where that was).
     to_floor: f64,
     to_sampled: DVec2,
-    /// The landing height the swing aims at: follows `to_floor` quickly but never in a
-    /// jump (the target crossing the edge of a step changed it by 30-40 cm mid-swing and
-    /// the foot snapped up with it), and how long a landing has waited for it.
+    /// Follows `to_floor` quickly but never in a jump: crossing a step's edge mid-swing snapped
+    /// the foot up 30-40 cm.
     land_z: f64,
     land_wait: f32,
-    /// Swing progress 0 … 1 and length (s) of a step not driven by the gait.
     t: f32,
-    /// A walking step: the gait's swing progress when the foot left (the swing's own
-    /// progress runs from there to the landing).
     t0: f32,
     dur: f32,
-    /// This step belongs to the walk (heel strike and push-off) rather than a shuffle.
     walk: bool,
     lift: f32,
 }
@@ -903,7 +804,6 @@ impl Foot {
     }
 }
 
-/// A person's animation state.
 #[derive(Debug, Clone)]
 pub struct Pose {
     rng: u32,
@@ -911,60 +811,42 @@ pub struct Pose {
     frame: u64,
     origin: DVec3,
     heading: f64,
-    /// Gait cycle (0 … 1, the left heel strikes at 0) and whether the gait drives the feet.
     phase: f32,
     gait: bool,
-    /// Walking weight for the upper body (0 … 1), smoothed ground speed (m/s), forward
-    /// acceleration (m/s²) and turning rate (deg/s).
     walk: f32,
     speed: f32,
     accel: f32,
     turn: f32,
     vel: DVec2,
     feet: [Foot; 2],
-    /// Standing offsets of the feet (a little different each time somebody settles).
     fidget: [Vec2; 2],
     fidget_t: f32,
-    /// 0 standing … 1 seated, and the seat.
     sit: f32,
     seat: Vec3,
     reach: f32,
     reach_at: Vec3,
-    /// Both hands on a steering wheel: how far (0 … 1) and where.
     grip: f32,
     grip_at: [Vec3; 2],
-    /// How the gripping hands lie (see `PoseInput::grip_frames`).
     grip_frame: Option<[(Vec3, Vec3); 2]>,
-    /// Extra lean towards the wheel (degrees, eased).
     grip_extra: f32,
     hold: f32,
-    /// Head direction (degrees: right, up) and where a glance goes and for how long.
     head: Vec2,
     glance: Vec2,
     glance_t: f32,
-    /// Weight shift: where the pelvis leans (m) and until when.
     shift: f32,
     shift_to: f32,
     shift_t: f32,
     breath: f32,
-    /// Balance against the floor's acceleration: lean (m/s² equivalent) and its rate.
     lean: Vec2,
     lean_v: Vec2,
-    /// Pelvis height offset kept from the last frame (rises are smoothed).
     drop: f32,
-    /// Floor under the body relative to the origin (smoothed), from the planted feet.
     body_floor: f32,
-    /// Per-person style: arm hang, head tilt, stance width.
     style: [f32; 4],
-    /// Steps taken to catch up with a foot left behind, and frames a foot had to be pulled
-    /// in (for the tests).
     catch_ups: u32,
     shuffles: u32,
-    /// A foot was put down in the last [`Pose::advance`] - one footstep sound.
     landed: bool,
 }
 
-/// Bone transforms and the joint positions they put the limbs at (model frame).
 #[derive(Debug, Clone)]
 pub struct Posed {
     pub bones: [Affine3A; SLOTS],
@@ -973,16 +855,12 @@ pub struct Posed {
     pub ankle: [Vec3; 2],
     pub elbow: [Vec3; 2],
     pub wrist: [Vec3; 2],
-    /// Lowest point of each sole (heel, ball or toe).
     pub sole: [f32; 2],
-    /// Knee flexion and ankle flexion (degrees, toes up positive) per side.
     pub knee_flex: [f32; 2],
     pub ankle_flex: [f32; 2],
-    /// How far each ankle stayed from where it should be (unreachable targets).
     pub leg_miss: [f32; 2],
     pub neck: Vec3,
-    /// All transforms are finite (else `bones` is the rest pose and the caller should keep
-    /// the last good mesh).
+    /// Else `bones` is the rest pose and the caller keeps the last good mesh.
     pub ok: bool,
 }
 
@@ -991,7 +869,6 @@ fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
-/// Move `x` towards `to` by at most `step`.
 fn approach(x: f32, to: f32, step: f32) -> f32 {
     if (to - x).abs() <= step {
         to
@@ -1000,7 +877,6 @@ fn approach(x: f32, to: f32, step: f32) -> f32 {
     }
 }
 
-/// Exponential smoothing factor for time constant `tau`.
 fn ease_k(dt: f32, tau: f32) -> f32 {
     1.0 - (-dt / tau.max(1e-3)).exp()
 }
@@ -1015,12 +891,10 @@ fn angle_diff(a: f64, b: f64) -> f64 {
     d
 }
 
-/// Rotation about z turning +y towards +x by `deg` (OMSI's heading sense).
 fn yaw_quat(deg: f32) -> Quat {
     Quat::from_rotation_z(-deg.to_radians())
 }
 
-/// A frame from a bone axis and a second direction (made perpendicular to it).
 fn basis(axis: Vec3, front: Vec3) -> Mat3A {
     let a = axis.normalize_or(Vec3::Z);
     let mut f = front - a * a.dot(front);
@@ -1031,12 +905,10 @@ fn basis(axis: Vec3, front: Vec3) -> Mat3A {
     Mat3A::from_cols(a.into(), f.into(), a.cross(f).into())
 }
 
-/// The rotation taking the rest frame (axis0, front0) onto (axis1, front1).
 fn bone_rot(axis0: Vec3, front0: Vec3, axis1: Vec3, front1: Vec3) -> Mat3A {
     basis(axis1, front1) * basis(axis0, front0).transpose()
 }
 
-/// A rigid bone transform: rotation `r` about the rest joint `rest`, which moves to `at`.
 fn joint_xf(rest: Vec3, at: Vec3, r: Mat3A) -> Affine3A {
     Affine3A::from_mat3_translation(r.into(), at - Vec3::from(r * Vec3A::from(rest)))
 }
@@ -1045,9 +917,7 @@ fn about(pivot: Vec3, q: Quat) -> Affine3A {
     Affine3A::from_translation(pivot) * Affine3A::from_quat(q) * Affine3A::from_translation(-pivot)
 }
 
-/// Two-bone IK: from `root` with bone lengths `l1`, `l2` to `target`, bending towards
-/// `pole`. Returns the middle joint, the end joint actually reached, and the bend-plane
-/// normal (the hinge).
+/// Two-bone IK towards `pole`: the middle joint, the end reached and the hinge.
 fn two_bone(root: Vec3, l1: f32, l2: f32, target: Vec3, pole: Vec3) -> (Vec3, Vec3, Vec3) {
     let d = target - root;
     let len = d.length();
@@ -1132,17 +1002,14 @@ impl Pose {
         (x >> 8) as f32 / (1u32 << 24) as f32
     }
 
-    /// 0 standing … 1 seated.
     pub fn sit_amount(&self) -> f32 {
         self.sit
     }
 
-    /// Sitting down or getting up is under way: the person should not walk off yet.
     pub fn settling(&self) -> bool {
         self.sit > 0.02 && self.sit < 0.98
     }
 
-    /// The state in a line, for `OMSI_DEBUG_POSE`.
     pub fn describe(&self) -> String {
         let foot = |f: &Foot| {
             if f.planted {
@@ -1181,19 +1048,16 @@ impl Pose {
         )
     }
 
-    /// Whether foot `side` (0 left, 1 right) is on the floor.
     pub fn planted(&self, side: usize) -> bool {
         self.feet[side.min(1)].planted
     }
 
-    /// A foot was put down during the last [`Pose::advance`]: one footfall, for the step
-    /// sound. (The gait plants a foot only while walking, so standing still is silent.)
+    /// One footfall: standing still is silent.
     pub fn landed(&self) -> bool {
         self.landed
     }
 
-    /// Nothing quick is going on (standing or sitting still: breathing, shifting, glancing),
-    /// so a lower update rate will not show.
+    /// A lower update rate will not show.
     pub fn calm(&self) -> bool {
         !self.gait
             && self.walk < 0.05
@@ -1203,7 +1067,6 @@ impl Pose {
             && (self.hold == 0.0 || self.hold == 1.0)
     }
 
-    /// Quick steps taken so far to catch up with a foot left behind.
     pub fn catch_ups(&self) -> u32 {
         self.catch_ups
     }
@@ -1236,7 +1099,6 @@ impl Pose {
         }
     }
 
-    /// Where a foot's resting place is in the floor frame for the body at `origin`/`heading`.
     fn rest_target(
         &self,
         rig: &Rig,
@@ -1274,7 +1136,6 @@ impl Pose {
         self.body_floor = 0.0;
     }
 
-    /// Ankle of a planted foot pitched by `pitch` degrees (toes up positive), floor frame.
     fn stance_ankle(rig: &Rig, f: &Foot, pitch: f32) -> DVec3 {
         let h = f.yaw.to_radians();
         let (s, c) = (h.sin(), h.cos());
@@ -1296,7 +1157,6 @@ impl Pose {
         f.pos + dir * (pivot + along) + DVec3::Z * (ph + up)
     }
 
-    /// Advance the animation by `dt` seconds.
     pub fn advance(&mut self, rig: &Rig, input: &PoseInput, dt: f32) {
         // nothing sensible to follow: keep the last state
         if !input.origin.is_finite() || !input.heading.is_finite() || !dt.is_finite() {
@@ -1532,12 +1392,8 @@ impl Pose {
         let prev_phase = self.phase;
         if self.gait {
             self.phase = (self.phase + dt * cadence) % 1.0;
-            // a foot left too far behind (the body was pushed on or sped up faster than the
-            // stride): a quick step catches up rather than the hips sinking to reach it. A
-            // foot left on another floor (a stair the body has gone down from, the bus floor
-            // after stepping off) goes first: it lifts the body's floor, so the other foot
-            // could never reach down and stepped again and again while this one was dragged
-            // along a flight up.
+            // a foot left too far behind takes a quick step rather than the hips sinking to it; one left
+            // on another floor (a stair, the bus) goes first, or the other foot stepped for good
             if self.feet.iter().all(|f| f.planted) {
                 let reach = (rig.thigh + rig.shin) * 0.997;
                 let mut worst: Option<(usize, f32)> = None;
@@ -1614,9 +1470,8 @@ impl Pose {
                 f.from_floor = f.pos.z;
                 f.planted = false;
                 f.walk = true;
-                // the swing starts at its beginning even when the lift-off came late (the
-                // other foot still in the air): begun at the phase's own progress, up to
-                // 0.3 of the way, the foot jumped 15-22 cm towards its landing in a frame
+                // the swing starts at its beginning even when the lift-off came late: begun later, the foot
+                // jumped 15-22 cm
                 f.t0 = ((u1 - beta) / (1.0 - beta)).clamp(0.0, 0.9);
                 f.t = 0.0;
                 f.to_sampled = DVec2::splat(f64::MAX);
@@ -1643,9 +1498,7 @@ impl Pose {
             let t0 = self.feet[side].t0;
             let t = ((tp - t0) / (1.0 - t0).max(0.1)).clamp(0.0, 1.0);
             let pred_origin = origin + (self.vel * remain as f64).extend(0.0);
-            // (the turn to come, but not more than a step's worth: at a quick turn the whole
-            // remaining swing's turn rate put the landing half a metre to the side, and the
-            // legs were flung out sideways)
+            // (the turn to come, at most a step's worth: at a quick turn the legs were flung sideways)
             let pred_heading = heading + (self.turn * remain).clamp(-25.0, 25.0) as f64;
             let (to, yaw) = self.rest_target(rig, side, pred_origin, pred_heading, true);
             let f = &mut self.feet[side];
@@ -1795,7 +1648,6 @@ impl Pose {
         self.landed = true;
     }
 
-    /// Update the landing floor height of the swinging feet.
     fn swing_floor(&mut self, input: &PoseInput, dt: f32) {
         let fallback = self.origin.z + self.body_floor as f64;
         for f in self.feet.iter_mut() {
@@ -1815,7 +1667,6 @@ impl Pose {
         }
     }
 
-    /// Bone transforms for the current state.
     pub fn bones(&mut self, rig: &Rig) -> Posed {
         let d = |deg: f32| deg.to_radians();
         let walk = self.walk;
@@ -1832,7 +1683,6 @@ impl Pose {
         let intensity = ((speed - 0.15) / 1.1).clamp(0.0, 1.0) * walk;
         let still = 1.0 - walk;
 
-        // --- feet targets (model frame): ankle positions, foot yaw and pitch ---
         let mut ankle_t = [Vec3::ZERO; 2];
         let mut foot_rot = [Mat3A::IDENTITY; 2];
         // the toes bend up against the foot while the heel is up, and straighten in the air
@@ -1847,9 +1697,7 @@ impl Pose {
             let f = self.feet[side];
             let u = (self.phase + if side == 0 { 0.0 } else { 0.5 }) % 1.0;
             let (ankle, yaw, pitch) = if f.planted {
-                // (a lift-off held back while the other foot is still in the air keeps the
-                // push-off pitch: drawn flat meanwhile, the ankle leapt 7 cm up and forward
-                // the moment the foot left)
+                // (a lift-off held back keeps the push-off pitch: drawn flat, the ankle leapt 7 cm)
                 let pitch = if f.walk && self.gait && u < beta + 0.3 {
                     stance_pitch(u.min(beta), beta, walk)
                 } else {
@@ -1870,9 +1718,7 @@ impl Pose {
                 };
                 let s = smoothstep(0.0, 1.0, t) as f64;
                 let mut a = f.from_ankle + (land - f.from_ankle) * s;
-                // up a step the foot rises early, down one it drops late
-                // (blended by the height, not switched: the curve changing mid-swing moved
-                // the foot as much as the floor did)
+                // up a step the foot rises early, down one it drops late, blended by the height
                 let rise = (land.z - f.from_ankle.z) as f32;
                 let up = smoothstep(0.0, 0.06, rise);
                 let down = smoothstep(0.0, 0.06, -rise);
@@ -1900,7 +1746,6 @@ impl Pose {
             foot_yaw[side] = yaw_l;
         }
 
-        // --- pelvis ---
         let sway = rig.hip_sway.sqrt();
         // towards the leg that carries the weight, dipping on the swinging side
         let lat_walk = -0.022 * rig.scale * sway.min(1.3) * (ph - 0.25).sin() * intensity;
@@ -1946,13 +1791,8 @@ impl Pose {
             rig.pelvis.y + 0.02 * walk,
             stand_z + bob + self.body_floor,
         ) + bus_shift;
-        // `self.seat` puts the pelvis a fixed distance (`SEAT_FRONT` in humans.rs) in
-        // front of the hip point, the same for every human type because the shared cabin
-        // that computed it has no rig to ask. Redone here with this rig's own
-        // `seat_front()` (from its actual thigh length), the knee lands where this body's
-        // legs naturally put it instead of at the average distance - on a long bench with
-        // no footwell to hide a mismatch in, a longer-legged rig forced to the average
-        // distance bent its knee enough to poke through the seat ahead.
+        // with this rig's own `seat_front()`: at the cabin's average distance a long-legged rig's
+        // knee poked through the seat ahead
         let seated_c = Vec3::new(
             self.seat.x,
             -rig.seat_front() + 0.03,
@@ -1989,13 +1829,8 @@ impl Pose {
         pc.z -= drop * (1.0 - s_ease);
         let pelvis_m = Affine3A::from_translation(pc - rig.pelvis) * about(rig.pelvis, pelvis_q);
 
-        // --- trunk and head ---
-        // shoulders against the hips, and a little towards what the head looks at
-        // (the shoulders take a good part of a look to the side - up to 30 degrees - so that
-        // the head turns no further on the trunk than a neck can: the people of OMSI have
-        // no neck bone, and the skin between collar and head, stretched by a head turned
-        // 60 degrees on still shoulders, made a twisted, broken neck of every passenger
-        // who looked at the driver)
+        // shoulders against the hips and part of a look to the side: with no neck bone, a head
+        // turned 60° on still shoulders made a broken neck
         let trunk_yaw = -pelvis_yaw * 1.7
             - d((self.head.x.clamp(-90.0, 90.0) * 0.42).clamp(-30.0, 30.0))
                 * (1.0 - walk)
@@ -2023,7 +1858,6 @@ impl Pose {
         let head_rel = limit_quat(trunk_rot.inverse() * head_world, d(45.0));
         let head_m = trunk_m * about(rig.head_pivot, head_rel);
 
-        // --- legs ---
         let mut out_bones = [Affine3A::IDENTITY; SLOTS];
         out_bones[HIP] = pelvis_m;
         out_bones[MAIN] = trunk_m;
@@ -2047,10 +1881,8 @@ impl Pose {
             let hip_at = pelvis_m.transform_point3(rig.hip[side]);
             let fwd = (foot_fwd[side] + pelvis_fwd).normalize_or(Vec3::Y);
             let pole = fwd + Vec3::Z * 0.25;
-            // Seated, the feet go where a sitting body puts them: the thigh along the seat,
-            // the shin hanging down. A floor further down than that (a seat on a podium or
-            // over a wheel arch) is not reached by stretching the leg straight at it - the
-            // leg ran diagonally through the seat's front - the feet hang above it instead.
+            // seated the feet hang where a sitting body puts them, above a floor further down: stretched
+            // to it, the leg ran through the seat's front
             if sit > 0.5 {
                 let flat = Vec3::new(pelvis_fwd.x, pelvis_fwd.y, 0.0).normalize_or(Vec3::Y);
                 let knee_n = hip_at + flat * rig.thigh * 0.95;
@@ -2068,9 +1900,7 @@ impl Pose {
                 two_bone(hip_at, rig.thigh, rig.shin, ankle_t[side], pole);
             let side_v = hinge;
             if let Some((t, from, land)) = swing[side] {
-                // in the air the ankle goes from pointed (push-off) through neutral to a
-                // little flexed; the pitch is that against the shin, blended from the
-                // push-off and into the heel strike
+                // in the air the ankle goes from pointed through neutral to a little flexed
                 let s_dir = (ankle_at - knee_at).normalize_or(-Vec3::Z);
                 let neutral = side_v.cross(s_dir).normalize_or(Vec3::Y);
                 let shin_pitch = neutral.z.clamp(-1.0, 1.0).asin().to_degrees();
@@ -2131,14 +1961,12 @@ impl Pose {
             posed.sole[side] = heel.z.min(toe.z).min(ball.z);
         }
 
-        // --- arms ---
         let run = run_factor(self.speed);
         let arm_amp = d(17.0) * rig.arm_swing.powf(0.7) * intensity * (1.0 + 1.1 * run);
         for side in 0..2 {
             let s = SIDE[side];
             let sh_at = trunk_m.transform_point3(rig.shoulder[side]);
-            // the hanging arm: swings against the legs (left arm forward when the right
-            // leg is), a little out from the body, the elbow bending more going forward
+            // the hanging arm swings against the legs
             let arm_fwd = if side == 0 { -ph.cos() } else { ph.cos() };
             let swing = arm_amp * arm_fwd - d(3.0) * walk
                 + d(20.0) * bump * (1.0 - s_down)
@@ -2237,8 +2065,7 @@ impl Pose {
             let wrist_flex = d(10.0) * (1.0 - if side == 1 { self.reach } else { 0.0 });
             let mut r_hand = r_fore * Mat3A::from_axis_angle(hinge0, wrist_flex);
             if let (true, Some(frames)) = (self.grip > 0.0, self.grip_frame) {
-                // round the rim: the knuckles along it, the palm against it (the rest hand
-                // lies palm down along the forearm); the wrist bends 80 degrees at most
+                // round the rim: the knuckles along it, the palm against it, the wrist bent 80° at most
                 let (dir, palm) = frames[side];
                 if dir.length_squared() > 1e-6 && palm.length_squared() > 1e-6 {
                     let want = bone_rot(c0, -Vec3::Z, dir.normalize(), palm.normalize());
@@ -2269,37 +2096,28 @@ impl Pose {
     }
 }
 
-/// How far (m) the hips would have to sink to reach a planted foot before it steps up.
 const CATCH_UP: f32 = 0.13;
 
-/// The most the hips sink to reach a planted foot (m).
 const MAX_DROP: f32 = 0.12;
 
-/// A planted foot this far (m) above or below the floor the body stands on is on another
-/// floor and steps over first.
+/// A planted foot this far above or below the body's floor is on another one and steps first.
 const STRANDED: f32 = 0.5;
 
-/// Share of a gait cycle a foot is on the floor.
 fn stance_fraction(speed: f32) -> f32 {
     let walk = (0.64 - 0.05 * (speed - 0.8)).clamp(0.57, 0.7);
     // running: the foot is down for well under half the stride, with a flight between
     walk + (0.38 - walk) * run_factor(speed)
 }
 
-/// How much of a run the gait is (0 walking … 1 running), by the speed (m/s).
 pub fn run_factor(speed: f32) -> f32 {
     smoothstep(2.0, 3.4, speed)
 }
 
-/// Foot pitch while planted during the walk (degrees, toes up positive): the heel strikes
-/// with the toes up and rolls down, the foot lies flat, then the heel rises until the toes
-/// push off.
 fn stance_pitch(u: f32, beta: f32, walk: f32) -> f32 {
     let heel = heel_pitch(walk) * (1.0 - smoothstep(0.0, 0.11, u));
     heel + toe_pitch(u, beta, walk)
 }
 
-/// Foot pitch at heel strike (degrees, toes up).
 fn heel_pitch(walk: f32) -> f32 {
     16.0 * walk.clamp(0.3, 1.0)
 }
@@ -2310,7 +2128,6 @@ fn toe_pitch(u: f32, beta: f32, walk: f32) -> f32 {
     -48.0 * walk.clamp(0.25, 1.0) * t * t
 }
 
-/// Limit a rotation to `max` radians.
 fn limit_quat(q: Quat, max: f32) -> Quat {
     let q = if q.w < 0.0 { -q } else { q };
     let (axis, angle) = q.to_axis_angle();
@@ -2321,7 +2138,8 @@ fn limit_quat(q: Quat, max: f32) -> Quat {
     }
 }
 
-/// The bone transforms of [`skin`] from Omsi.exe's thirteen bones
+/// Standing, the body is lifted by what the flat feet would sink and each foot is pitched to
+/// stay out of the floor: the stiff OMSI feet put heels and toes 7 cm into it.
 pub fn slots_from_omsi(
     b: &[Affine3A; crate::human_omsi::BONES],
     rig: &Rig,
@@ -2400,7 +2218,6 @@ fn grounded_foot(shin: &Affine3A, rig: &Rig, side: usize) -> Option<Affine3A> {
     )
 }
 
-/// Deform `mesh` with the bone transforms (linear blend skinning).
 pub fn skin(
     mesh: &HumanMesh,
     bones: &[Affine3A; SLOTS],
@@ -2487,7 +2304,11 @@ mod tests {
                 }
             }
         }
-        assert!(worst < 0.005, "a foot sank {:.1} cm into the floor", worst * 100.0);
+        assert!(
+            worst < 0.005,
+            "a foot sank {:.1} cm into the floor",
+            worst * 100.0
+        );
     }
 
     #[test]
@@ -2497,7 +2318,6 @@ mod tests {
         assert_eq!(bone_id_by_name("unknown"), None);
     }
 
-    /// A rig like the stock adults', without a mesh.
     fn rig() -> Rig {
         let def = Human {
             height: 1.77,
@@ -2923,11 +2743,8 @@ mod tests {
         }
     }
 
-    /// Down a flight whose floor the feet only know in steps (a landing 0.7 m up, then the
-    /// aisle) while the body slides down it evenly, as on the SD202's stairs: a foot left on
-    /// the landing lifted the body's floor, the other one landing on the aisle below could
-    /// not be reached and stepped again and again, and the first was dragged along the
-    /// aisle a flight up. Once the body is down, both feet are down.
+    /// The SD202's stairs: a foot left on the landing lifted the body's floor, and the other one
+    /// stepped for good.
     #[test]
     fn a_foot_left_on_a_landing_comes_down() {
         let r = rig();
@@ -2963,8 +2780,6 @@ mod tests {
         );
     }
 
-    /// Stepping off a bus: the feet on its floor (0.45 m up) are carried into the ground's
-    /// frame where they are, and within a second of walking on both are on the pavement.
     #[test]
     fn feet_come_off_the_bus_floor() {
         let r = rig();
@@ -3013,12 +2828,8 @@ mod tests {
     }
 }
 
-/// The hands of a human type closed round a bar of `radius` (m; a steering wheel's rim):
-/// every vertex of a hand beyond the knuckles is bent round an axis across the palm, as far
-/// round as its distance from the knuckles reaches, so that the fingers wrap the bar from
-/// the back of the hand to the palm. The rest pose stays: the hands lie palm down along the
-/// arms, the thumbs (which sit before the knuckles) are left as they are. Returns positions
-/// and normals per mesh, for [`skin_from`].
+/// The fingers bent round a bar of `radius` (a steering wheel's rim) from the back of the hand
+/// to the palm; the thumbs are left as they are.
 pub fn curl_hands(ty: &HumanType, radius: f32) -> Vec<(Vec<Vec3>, Vec<Vec3>)> {
     let rig = &ty.rig;
     let hand_len = (ty.joints.finger - ty.joints.hand)
@@ -3120,8 +2931,6 @@ pub fn curl_hands(ty: &HumanType, radius: f32) -> Vec<(Vec<Vec3>, Vec<Vec3>)> {
     out
 }
 
-/// Where the fingers that [`curl_hands`] closed round a bar of `radius` hold it: the bar's
-/// centre in the rest frame (left, right), for a caller that wants the bar exactly there.
 pub fn grip_centres(ty: &HumanType, radius: f32) -> [Option<Vec3>; 2] {
     let rig = &ty.rig;
     let hand_len = (ty.joints.finger - ty.joints.hand)
@@ -3154,12 +2963,10 @@ pub fn grip_centres(ty: &HumanType, radius: f32) -> [Option<Vec3>; 2] {
     })
 }
 
-/// The bone slot of a hand (0 left, 1 right) in [`Posed::bones`].
 pub fn hand_slot(side: usize) -> usize {
     HAND[side.min(1)]
 }
 
-/// [`skin`] of `mesh` with its positions and normals replaced (see [`curl_hands`]).
 pub fn skin_from(
     mesh: &HumanMesh,
     rest: &(Vec<Vec3>, Vec<Vec3>),

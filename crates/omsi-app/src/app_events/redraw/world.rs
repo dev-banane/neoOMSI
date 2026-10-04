@@ -31,10 +31,6 @@ impl App {
                     log::info!("people: {} bus stops with timetable targets", t.len());
                 }
             }
-            h.driver_away = self.on_foot.as_ref().is_some_and(|f| {
-                let own = Some(humans::BusId::Player);
-                f.seat.map(|s| s.0) != own && f.inside.map(|i| i.0) != own
-            });
             h.density = w
                 .global
                 .passenger_density((self.clock.time / 3600.0) as f32)
@@ -48,7 +44,7 @@ impl App {
             self.humans_populate_t -= dt;
             if self.humans_populate_t <= 0.0 && !self.paused {
                 self.humans_populate_t = 2.0;
-                h.populate(w, r, scene, center);
+                h.populate(w, center);
             }
             if let (Some(cam), Some(s)) = (self.camera.as_ref(), self.surface.as_ref()) {
                 h.eye = Some(humans::Eye::of(
@@ -107,7 +103,6 @@ impl App {
                     p.vehicle.set_var("GivenTicket", -1.0);
                 }
                 h.give_ticket = std::mem::take(&mut p.give_ticket);
-                h.give_change_all = std::mem::take(&mut p.give_change);
                 if std::mem::take(&mut p.take_change) {
                     h.take_change_tray();
                 }

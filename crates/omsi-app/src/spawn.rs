@@ -501,7 +501,6 @@ pub(crate) fn spawn_player(
         startup: None,
         startup_at: None,
         give_ticket: false,
-        give_change: false,
         cam_before_special: None,
         held_keys: Default::default(),
         hand_coupled: 0,

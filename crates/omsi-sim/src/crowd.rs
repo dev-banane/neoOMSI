@@ -1,59 +1,25 @@
-//! People on foot as a crowd: local avoidance between walkers and round vehicles, and
-//! routes over a vehicle's cabin path network (`paths.cfg`).
-//!
-//! Avoidance is the anticipatory time-to-collision force of Karamouzas, Skinner and Guy
-//! ("Universal power law governing pedestrian interactions", 2014): every walker looks at
-//! when it would touch each neighbour if both kept their velocities and turns away from
-//! that future contact the harder the sooner it comes. That is what makes two people give
-//! way to each other a few metres early instead of bumping and sliding round each other
-//! (which a plain repulsion does). A contact pass afterwards guarantees that nobody ends up
-//! inside anybody else, and people standing still (waiting, queueing) are pushed less than
-//! people walking - the one who walks goes round, the one who stands makes a little room.
+//! Time-to-collision avoidance (Karamouzas, Skinner and Guy, 2014): people give way a few
+//! metres early instead of bumping and sliding round each other.
 
-use glam::{DVec2, Vec3};
+use glam::DVec2;
 use hashbrown::HashMap;
 
-/// One person on foot in a plane (the ground, or the floor of one bus).
 #[derive(Debug, Clone, Copy)]
 pub struct Walker {
     pub pos: DVec2,
     pub vel: DVec2,
     pub radius: f64,
-    /// Preferred velocity this frame (where the person wants to go, how fast).
     pub want: DVec2,
-    /// How far the person yields to others and to contact (0 = not at all, 1 = fully).
-    /// People standing in a queue or at a stop give little; walkers give fully.
+    /// How far the person yields to others and to contact (0 not at all, 1 fully).
     pub give: f64,
-    /// Walkers only see walkers of the same space (0 = the ground, else one bus floor).
-    pub space: u64,
-    /// Seen by the others but not moved (a pedestrian held on a pavement lane, somebody
-    /// seated, a person carried through a door by the bus).
+    /// Seen by the others but not moved.
     pub fixed: bool,
-    /// Passes through other walkers for a moment: the way out of a deadlock in a doorway
-    /// or a narrow aisle (two people who have pushed against each other for seconds).
+    /// Passes through others for a moment: the way out of a deadlock in a doorway.
     pub ghost: bool,
-    /// Keeps to within `.2` of the segment `.0`-`.1` (an aisle): avoidance may move a walker
-    /// sideways, never into the seats.
+    /// Keeps within `.2` of the segment `.0`-`.1`.
     pub corridor: Option<(DVec2, DVec2, f64)>,
 }
 
-impl Walker {
-    pub fn new(pos: DVec2, radius: f64, space: u64) -> Walker {
-        Walker {
-            pos,
-            vel: DVec2::ZERO,
-            radius,
-            want: DVec2::ZERO,
-            give: 1.0,
-            space,
-            fixed: false,
-            ghost: false,
-            corridor: None,
-        }
-    }
-}
-
-/// A box nobody walks through (a vehicle), on the ground.
 #[derive(Debug, Clone, Copy)]
 pub struct Block {
     pub center: DVec2,
@@ -61,7 +27,6 @@ pub struct Block {
     pub half: DVec2,
     /// Radians, clockwise from north (like vehicle headings).
     pub heading: f64,
-    /// Velocity of the vehicle (m/s): people keep out of the way of a moving bus earlier.
     pub vel: DVec2,
 }
 
@@ -71,7 +36,6 @@ impl Block {
         (DVec2::new(c, -s), DVec2::new(s, c))
     }
 
-    /// Closest point of the box's outline to `p` and whether `p` lies inside it.
     pub fn closest(&self, p: DVec2) -> (DVec2, bool) {
         let (r, f) = self.axes();
         let d = p - self.center;
@@ -94,7 +58,6 @@ impl Block {
         (self.center + r * q.x + f * q.y, false)
     }
 
-    /// Whether `p` lies within `margin` of the box.
     pub fn near(&self, p: DVec2, margin: f64) -> bool {
         let (r, f) = self.axes();
         let d = p - self.center;
@@ -106,18 +69,12 @@ fn sign(v: f64) -> f64 {
     if v < 0.0 { -1.0 } else { 1.0 }
 }
 
-/// Tuning of the crowd model.
 #[derive(Debug, Clone, Copy)]
 pub struct CrowdParams {
-    /// Scale of the anticipatory force.
     pub k: f64,
-    /// Time horizon (s): collisions further away than about this matter little.
     pub tau0: f64,
-    /// Relaxation time towards the preferred velocity (s).
     pub relax: f64,
-    /// Largest acceleration (m/s²): nobody starts, stops or swerves like a robot.
     pub max_accel: f64,
-    /// How far a walker looks for neighbours (m).
     pub sense: f64,
 }
 
@@ -133,32 +90,12 @@ impl Default for CrowdParams {
     }
 }
 
-impl CrowdParams {
-    /// Inside a bus people are close by necessity: they look less far ahead and brush past
-    /// each other instead of stopping a metre early.
-    pub fn cabin() -> CrowdParams {
-        CrowdParams {
-            k: 0.6,
-            tau0: 1.2,
-            relax: 0.35,
-            max_accel: 2.0,
-            sense: 2.0,
-        }
-    }
-}
-
 const CELL: f64 = 2.0;
 
-fn cell_of(space: u64, p: DVec2) -> (u64, i32, i32) {
-    (
-        space,
-        (p.x / CELL).floor() as i32,
-        (p.y / CELL).floor() as i32,
-    )
+fn cell_of(p: DVec2) -> (i32, i32) {
+    ((p.x / CELL).floor() as i32, (p.y / CELL).floor() as i32)
 }
 
-/// Anticipatory avoidance force on a walker at `x` with velocity `v` from a body at
-/// `xo` moving with `vo` (combined radius `r`). Zero when they would never touch.
 fn ttc_force(p: &CrowdParams, x: DVec2, v: DVec2, xo: DVec2, vo: DVec2, r: f64) -> DVec2 {
     let w = xo - x;
     let dist = w.length();
@@ -185,15 +122,13 @@ fn ttc_force(p: &CrowdParams, x: DVec2, v: DVec2, xo: DVec2, vo: DVec2, r: f64) 
     if len > 12.0 { f * (12.0 / len) } else { f }
 }
 
-/// Advance all walkers by `dt`: velocities follow the wishes with avoidance, positions
-/// integrate, contacts are resolved. `blocks` only concern the ground (space 0).
 pub fn step(walkers: &mut [Walker], blocks: &[Block], params: &CrowdParams, dt: f64) {
     if dt <= 0.0 || walkers.is_empty() {
         return;
     }
-    let mut grid: HashMap<(u64, i32, i32), Vec<usize>> = HashMap::new();
+    let mut grid: HashMap<(i32, i32), Vec<usize>> = HashMap::new();
     for (i, w) in walkers.iter().enumerate() {
-        grid.entry(cell_of(w.space, w.pos)).or_default().push(i);
+        grid.entry(cell_of(w.pos)).or_default().push(i);
     }
     let reach = (params.sense / CELL).ceil() as i32;
     let mut new_vel = vec![DVec2::ZERO; walkers.len()];
@@ -203,11 +138,11 @@ pub fn step(walkers: &mut [Walker], blocks: &[Block], params: &CrowdParams, dt: 
         }
         let mut force = (me.want - me.vel) / params.relax;
         let mut avoid = DVec2::ZERO;
-        let (sp, cx, cy) = cell_of(me.space, me.pos);
+        let (cx, cy) = cell_of(me.pos);
         if !me.ghost {
             for gy in cy - reach..=cy + reach {
                 for gx in cx - reach..=cx + reach {
-                    let Some(list) = grid.get(&(sp, gx, gy)) else {
+                    let Some(list) = grid.get(&(gx, gy)) else {
                         continue;
                     };
                     for &j in list {
@@ -229,17 +164,15 @@ pub fn step(walkers: &mut [Walker], blocks: &[Block], params: &CrowdParams, dt: 
                 }
             }
         }
-        if me.space == 0 {
-            for b in blocks {
-                if !b.near(me.pos, params.sense) {
-                    continue;
-                }
-                let (q, inside) = b.closest(me.pos);
-                if inside {
-                    continue;
-                }
-                avoid += ttc_force(params, me.pos, me.vel, q, b.vel, me.radius + 0.05);
+        for b in blocks {
+            if !b.near(me.pos, params.sense) {
+                continue;
             }
+            let (q, inside) = b.closest(me.pos);
+            if inside {
+                continue;
+            }
+            avoid += ttc_force(params, me.pos, me.vel, q, b.vel, me.radius + 0.05);
         }
         // Straight at somebody the force only brakes, and two people stop nose to nose:
         // a walker then steps to the right, as people do.
@@ -273,13 +206,12 @@ pub fn step(walkers: &mut [Walker], blocks: &[Block], params: &CrowdParams, dt: 
             w.pos = ease_into_corridor(w.pos, a, b, dev, dt);
         }
     }
-    // contacts: nobody inside anybody else or inside a vehicle
     for _ in 0..2 {
         for i in 0..walkers.len() {
-            let (sp, cx, cy) = cell_of(walkers[i].space, walkers[i].pos);
+            let (cx, cy) = cell_of(walkers[i].pos);
             for gy in cy - 1..=cy + 1 {
                 for gx in cx - 1..=cx + 1 {
-                    let Some(list) = grid.get(&(sp, gx, gy)) else {
+                    let Some(list) = grid.get(&(gx, gy)) else {
                         continue;
                     };
                     for &j in list {
@@ -287,7 +219,7 @@ pub fn step(walkers: &mut [Walker], blocks: &[Block], params: &CrowdParams, dt: 
                             continue;
                         }
                         let (a, b) = (walkers[i], walkers[j]);
-                        if a.ghost || b.ghost || a.space != b.space {
+                        if a.ghost || b.ghost {
                             continue;
                         }
                         let d = b.pos - a.pos;
@@ -314,7 +246,7 @@ pub fn step(walkers: &mut [Walker], blocks: &[Block], params: &CrowdParams, dt: 
             }
         }
         for w in walkers.iter_mut() {
-            if w.fixed || w.space != 0 {
+            if w.fixed {
                 continue;
             }
             for b in blocks {
@@ -341,11 +273,9 @@ pub fn step(walkers: &mut [Walker], blocks: &[Block], params: &CrowdParams, dt: 
     }
 }
 
-/// [`clamp_to_corridor`] a little at a time: a walker outside the corridor is brought back
-/// at up to 0.6 m/s. Clamped outright, a stroller jumped 5-6 cm in one frame wherever one
-/// pavement path took over from the next (their lines do not meet exactly) - the "micro
-/// teleports" - and whenever a corridor changed under somebody standing off its line.
-pub fn ease_into_corridor(p: DVec2, a: DVec2, b: DVec2, max_dev: f64, dt: f64) -> DVec2 {
+/// Clamped outright, a stroller jumped 5-6 cm wherever one pavement path took over from the
+/// next.
+fn ease_into_corridor(p: DVec2, a: DVec2, b: DVec2, max_dev: f64, dt: f64) -> DVec2 {
     let q = clamp_to_corridor(p, a, b, max_dev);
     let d = q - p;
     let step = 0.6 * dt.max(0.0) + 0.002;
@@ -356,8 +286,6 @@ pub fn ease_into_corridor(p: DVec2, a: DVec2, b: DVec2, max_dev: f64, dt: f64) -
     }
 }
 
-/// Turn `from` towards `to` (degrees) at most `rate` degrees per second, easing in at the
-/// end so that a turn does not stop with a jolt.
 pub fn turn_towards(from: f64, to: f64, rate: f64, dt: f64) -> f64 {
     let diff = angle_diff(from, to);
     // proportional near the target (time constant 0.25 s), capped at `rate`
@@ -382,15 +310,13 @@ pub fn heading_of(d: DVec2) -> f64 {
     d.x.atan2(d.y).to_degrees()
 }
 
-/// Nearest point to `p` on the segment `a`-`b` and the parameter along it (0..1).
 pub fn project_on_segment(p: DVec2, a: DVec2, b: DVec2) -> (DVec2, f64) {
     let ab = b - a;
     let t = ((p - a).dot(ab) / ab.length_squared().max(1e-9)).clamp(0.0, 1.0);
     (a + ab * t, t)
 }
 
-/// Keep `p` within `max_dev` of the segment `a`-`b` (a walker in a narrow aisle).
-pub fn clamp_to_corridor(p: DVec2, a: DVec2, b: DVec2, max_dev: f64) -> DVec2 {
+fn clamp_to_corridor(p: DVec2, a: DVec2, b: DVec2, max_dev: f64) -> DVec2 {
     let (q, _) = project_on_segment(p, a, b);
     let d = p - q;
     let len = d.length();
@@ -398,298 +324,6 @@ pub fn clamp_to_corridor(p: DVec2, a: DVec2, b: DVec2, max_dev: f64) -> DVec2 {
         q + d * (max_dev / len)
     } else {
         p
-    }
-}
-
-/// The walking network of a vehicle's cabin: `[pathpnt]`s and `[pathlink]`s.
-#[derive(Debug, Clone, Default)]
-pub struct PathGraph {
-    pub points: Vec<Vec3>,
-    adj: Vec<Vec<(usize, f32)>>,
-}
-
-impl PathGraph {
-    /// `links`: (a, b, one-way) as in `paths.cfg`.
-    pub fn new(points: Vec<Vec3>, links: &[(i32, i32, bool)]) -> PathGraph {
-        let n = points.len();
-        let mut adj = vec![Vec::new(); n];
-        for &(a, b, oneway) in links {
-            if a < 0 || b < 0 {
-                continue;
-            }
-            let (a, b) = (a as usize, b as usize);
-            if a >= n || b >= n || a == b {
-                continue;
-            }
-            let d = (points[a] - points[b]).length();
-            adj[a].push((b, d));
-            if !oneway {
-                adj[b].push((a, d));
-            }
-        }
-        PathGraph { points, adj }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.points.is_empty()
-    }
-
-    /// Path point nearest `p` (height counts three times: the upper deck is not "near").
-    pub fn nearest(&self, p: Vec3) -> Option<usize> {
-        let d = |q: Vec3| {
-            let v = q - p;
-            v.x * v.x + v.y * v.y + (v.z * 3.0) * (v.z * 3.0)
-        };
-        self.points
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| !self.adj[*i].is_empty())
-            .min_by(|a, b| d(*a.1).total_cmp(&d(*b.1)))
-            .map(|(i, _)| i)
-    }
-
-    /// Shortest walk from path point `a` to path point `b` (point indices, `a` first).
-    pub fn route_points(&self, a: usize, b: usize) -> Option<Vec<usize>> {
-        let n = self.points.len();
-        if a >= n || b >= n {
-            return None;
-        }
-        let mut dist = vec![f32::INFINITY; n];
-        let mut prev = vec![usize::MAX; n];
-        let mut done = vec![false; n];
-        dist[a] = 0.0;
-        loop {
-            let mut u = usize::MAX;
-            let mut best = f32::INFINITY;
-            for i in 0..n {
-                if !done[i] && dist[i] < best {
-                    best = dist[i];
-                    u = i;
-                }
-            }
-            if u == usize::MAX || u == b {
-                break;
-            }
-            done[u] = true;
-            for &(v, w) in &self.adj[u] {
-                if dist[u] + w < dist[v] {
-                    dist[v] = dist[u] + w;
-                    prev[v] = u;
-                }
-            }
-        }
-        if !dist[b].is_finite() {
-            return None;
-        }
-        let mut out = vec![b];
-        let mut x = b;
-        while x != a {
-            x = prev[x];
-            out.push(x);
-        }
-        out.reverse();
-        Some(out)
-    }
-
-    /// Walking distance from path point `a` to every path point (infinite when unreachable).
-    pub fn distances_from(&self, a: usize) -> Vec<f32> {
-        let n = self.points.len();
-        let mut dist = vec![f32::INFINITY; n];
-        if a >= n {
-            return dist;
-        }
-        let mut done = vec![false; n];
-        dist[a] = 0.0;
-        loop {
-            let mut u = usize::MAX;
-            let mut best = f32::INFINITY;
-            for i in 0..n {
-                if !done[i] && dist[i] < best {
-                    best = dist[i];
-                    u = i;
-                }
-            }
-            if u == usize::MAX {
-                break;
-            }
-            done[u] = true;
-            for &(v, w) in &self.adj[u] {
-                if dist[u] + w < dist[v] {
-                    dist[v] = dist[u] + w;
-                }
-            }
-        }
-        dist
-    }
-
-    /// Path points linked to `i` (either way).
-    pub fn neighbours(&self, i: usize) -> Vec<usize> {
-        let mut out: Vec<usize> = self
-            .adj
-            .get(i)
-            .map(|a| a.iter().map(|x| x.0).collect())
-            .unwrap_or_default();
-        for (j, a) in self.adj.iter().enumerate() {
-            if a.iter().any(|x| x.0 == i) && !out.contains(&j) {
-                out.push(j);
-            }
-        }
-        out
-    }
-
-    /// Length of the shortest walk between two path points (infinite when unconnected).
-    pub fn distance(&self, a: usize, b: usize) -> f32 {
-        match self.route_points(a, b) {
-            Some(pts) => pts
-                .windows(2)
-                .map(|w| (self.points[w[0]] - self.points[w[1]]).length())
-                .sum(),
-            None => f32::INFINITY,
-        }
-    }
-
-    /// Walk from `from` to `to` (bus frame): onto the network at the point nearest `from`,
-    /// along it to the point nearest `to`, then to `to`. Points the walker is already
-    /// standing on or has half passed are left out. A cabin without a network is crossed
-    /// in a straight line.
-    pub fn route(&self, from: Vec3, to: Vec3) -> Vec<Vec3> {
-        // Onto the network where it passes closest - on a link, not at its nearest point.
-        // The nearest *point* of a seat was often the one of the row behind (or across a
-        // partition), and the walk to it went diagonally through the seat backs and the
-        // wall; the nearest link is the aisle beside the seat.
-        if let (Some(l1), Some(l2)) = (self.nearest_link(from), self.nearest_link(to)) {
-            if let Some(r) = self.route_links(from, l1, l2, to) {
-                return r;
-            }
-        }
-        let (Some(a), Some(b)) = (self.nearest(from), self.nearest(to)) else {
-            return vec![to];
-        };
-        self.route_via(from, a, b, to)
-    }
-
-    /// The link passing closest to `p` (height counts three times, as in `nearest`): its
-    /// two points and the closest point on it.
-    fn nearest_link(&self, p: Vec3) -> Option<(usize, usize, Vec3)> {
-        let mut best: Option<(f32, usize, usize, Vec3)> = None;
-        for (a, adj) in self.adj.iter().enumerate() {
-            for &(b, _) in adj {
-                let (pa, pb) = (self.points[a], self.points[b]);
-                let ab = pb - pa;
-                let len2 = ab.length_squared();
-                let t = if len2 > 1e-6 {
-                    ((p - pa).dot(ab) / len2).clamp(0.0, 1.0)
-                } else {
-                    0.0
-                };
-                let q = pa + ab * t;
-                let v = q - p;
-                let d = v.x * v.x + v.y * v.y + (v.z * 3.0) * (v.z * 3.0);
-                if best.map(|b| d < b.0).unwrap_or(true) {
-                    best = Some((d, a, b, q));
-                }
-            }
-        }
-        best.map(|(_, a, b, q)| (a, b, q))
-    }
-
-    /// The walk from `from` onto link `l1`, along the network and off link `l2` to `to`
-    /// (None when the two links are not connected).
-    fn route_links(
-        &self,
-        from: Vec3,
-        l1: (usize, usize, Vec3),
-        l2: (usize, usize, Vec3),
-        to: Vec3,
-    ) -> Option<Vec<Vec3>> {
-        let (a1, b1, q1) = l1;
-        let (a2, b2, q2) = l2;
-        let mut out: Vec<Vec3> = Vec::new();
-        let push = |out: &mut Vec<Vec3>, p: Vec3| {
-            let last = out.last().copied().unwrap_or(from);
-            if (p - last).length() > 0.05 {
-                out.push(p);
-            }
-        };
-        // (stepping onto the network only from off it: a walker on the link goes on)
-        if (q1 - from).truncate().length() > 0.25 {
-            push(&mut out, q1);
-        }
-        let same = (a1 == a2 && b1 == b2) || (a1 == b2 && b1 == a2);
-        if !same {
-            let mut best: Option<(f32, Vec<usize>)> = None;
-            for e1 in [a1, b1] {
-                for e2 in [a2, b2] {
-                    let Some(pts) = self.route_points(e1, e2) else {
-                        continue;
-                    };
-                    let along: f32 = pts
-                        .windows(2)
-                        .map(|w| (self.points[w[0]] - self.points[w[1]]).length())
-                        .sum();
-                    let total =
-                        (self.points[e1] - q1).length() + along + (self.points[e2] - q2).length();
-                    if best.as_ref().map(|b| total < b.0).unwrap_or(true) {
-                        best = Some((total, pts));
-                    }
-                }
-            }
-            let (_, pts) = best?;
-            for i in pts {
-                push(&mut out, self.points[i]);
-            }
-        }
-        if (q2 - to).truncate().length() > 0.25 {
-            push(&mut out, q2);
-        }
-        push(&mut out, to);
-        if out.is_empty() {
-            out.push(to);
-        }
-        Some(out)
-    }
-
-    /// Like `route`, between known path points.
-    pub fn route_via(&self, from: Vec3, a: usize, b: usize, to: Vec3) -> Vec<Vec3> {
-        let mut out: Vec<Vec3> = match self.route_points(a, b) {
-            Some(pts) => pts.into_iter().map(|i| self.points[i]).collect(),
-            None => Vec::new(),
-        };
-        while !out.is_empty() && (out[0] - from).truncate().length() < 0.05 {
-            out.remove(0);
-        }
-        // the walker already stands on the first leg: go straight for the second point
-        if out.len() >= 2 {
-            let (p0, p1) = (out[0], out[1]);
-            let (_, t) = project_on_segment(
-                from.truncate().as_dvec2(),
-                p0.truncate().as_dvec2(),
-                p1.truncate().as_dvec2(),
-            );
-            let q = p0 + (p1 - p0) * t as f32;
-            if t > 0.0 && t < 1.0 && (q - from).truncate().length() < 0.3 {
-                out.remove(0);
-            }
-        }
-        if out
-            .last()
-            .map(|l| (*l - to).length() > 0.05)
-            .unwrap_or(true)
-        {
-            out.push(to);
-        }
-        out
-    }
-
-    /// Length of a route starting at `from`.
-    pub fn length(from: Vec3, route: &[Vec3]) -> f32 {
-        let mut last = from;
-        let mut total = 0.0;
-        for p in route {
-            total += (*p - last).truncate().length();
-            last = *p;
-        }
-        total
     }
 }
 
@@ -704,7 +338,6 @@ mod tests {
             radius: 0.25,
             want,
             give: 1.0,
-            space: 0,
             fixed: false,
             ghost: false,
             corridor: None,
@@ -844,7 +477,7 @@ mod tests {
                 ..walker(0.0, 0.2, DVec2::new(0.0, -1.0))
             },
         ];
-        let p = CrowdParams::cabin();
+        let p = CrowdParams::default();
         for _ in 0..60 {
             w[0].want = DVec2::new(0.0, 1.0);
             w[1].want = DVec2::new(0.0, -1.0);
@@ -874,28 +507,6 @@ mod tests {
             0.3,
         );
         assert!((q - DVec2::new(0.1, 2.0)).length() < 1e-9);
-    }
-
-    #[test]
-    fn cabin_route_follows_one_way_links() {
-        // 0-1-2 two-way, 2->3 one-way, 3->0 one-way
-        let pts = vec![
-            Vec3::new(0.0, 0.0, 0.5),
-            Vec3::new(0.0, -2.0, 0.5),
-            Vec3::new(0.0, -4.0, 0.5),
-            Vec3::new(0.0, -4.0, 2.5),
-        ];
-        let g = PathGraph::new(
-            pts,
-            &[(0, 1, false), (1, 2, false), (2, 3, true), (3, 0, true)],
-        );
-        assert_eq!(g.route_points(0, 3), Some(vec![0, 1, 2, 3]));
-        assert_eq!(g.route_points(3, 2), Some(vec![3, 0, 1, 2]));
-        let r = g.route(Vec3::new(0.0, 0.1, 0.5), Vec3::new(0.5, -2.0, 0.9));
-        assert_eq!(r.last().copied(), Some(Vec3::new(0.5, -2.0, 0.9)));
-        assert!(r.contains(&Vec3::new(0.0, -2.0, 0.5)));
-        assert!((g.distance(0, 2) - 4.0).abs() < 1e-5);
-        assert!(g.distance(0, 3) > 5.9 && g.distance(0, 3) < 6.1);
     }
 
     #[test]

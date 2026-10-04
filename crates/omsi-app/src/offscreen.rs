@@ -189,7 +189,7 @@ pub(crate) fn run_offscreen(
         h.time_of_day = parse_time(&args.time);
         h.stop_targets = schedule.as_ref().map(|s| s.stop_targets());
         h.stop_names = schedule.as_ref().map(|s| s.stop_names());
-        h.populate(&world, &renderer, &mut scene, center);
+        h.populate(&world, center);
         if let Some(p) = player.as_ref() {
             if args.riders > 0 {
                 h.seed_riders(args.riders, &p.vehicle, &world, &renderer, &mut scene);
@@ -1094,7 +1094,7 @@ pub(crate) fn run_offscreen(
                     .chain(player.as_ref().map(|p| p.vehicle.position))
                     .collect();
                 for c in &player_centers {
-                    h.populate(&world, &renderer, &mut scene, *c);
+                    h.populate(&world, *c);
                 }
                 // also update which stops the LAN players are near
                 h.lan_centers = player_centers;
@@ -1162,10 +1162,6 @@ pub(crate) fn run_offscreen(
                 }
                 p.vehicle.host.humans_on_path_link = h.path_link_counts();
                 p.vehicle.host.humans_on_seat = h.seat_counts();
-            }
-            if h.tracing() {
-                // OMSI_TRACE_PAX wants every frame as a window would draw it
-                h.sync(&renderer, &mut scene, eye_cam.position);
             }
             if let Some(m) = h.take_message() {
                 log::info!("HUD: {m}");

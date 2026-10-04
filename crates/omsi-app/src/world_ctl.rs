@@ -253,10 +253,7 @@ impl App {
             self.scene.as_mut(),
         ) {
             if let Some(h) = self.humans.as_mut() {
-                h.evict(
-                    crate::humans::BusId::Ai(crate::humans::placed_bus_id(old.uid)),
-                    &w,
-                );
+                h.evict(crate::humans::BusId::Ai(crate::humans::placed_bus_id(old.uid)));
             }
             if let Some(mut d) = old.driver.take() {
                 d.hide(r, scene);
