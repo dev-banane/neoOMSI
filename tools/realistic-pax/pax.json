@@ -105,6 +105,11 @@
     ]
   },
   "weights": {
+    "Adults/Female_Adult_06": 0.25,
+    "Adults/Female_Adult_10": 0.25,
+    "Adults/Male_Adult_15": 0.15,
+    "Adults/Male_Adult_19": 0.15,
+    "Adults/Male_Adult_21": 0.15,
     "Professions/Business": 1.0,
     "Professions/Wood": 1.0,
     "Professions/Delivery": 0.6,

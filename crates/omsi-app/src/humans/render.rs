@@ -1,14 +1,57 @@
 use super::*;
 
-pub(super) fn walk_input(speed: f32, dt: f32) -> AnimInput {
+pub(super) fn walk_input(speed: f32, dt: f32, natural: bool, seed: u32) -> AnimInput {
     AnimInput {
         kind: (speed > 0.05) as u8,
         speed,
         moved: speed * dt,
         room_height: OUTSIDE_ROOM,
         dt_ms: dt * 1000.0,
+        natural,
+        seed,
         ..Default::default()
     }
+}
+
+/// A soft dark patch, the sky light a body keeps off the floor under it.
+fn contact_shadow(renderer: &Renderer, scene: &mut Scene) -> (MeshId, MaterialId) {
+    const N: u32 = 64;
+    let mut rgba = Vec::with_capacity((N * N * 4) as usize);
+    let edge = (-4.5f32).exp();
+    for y in 0..N {
+        for x in 0..N {
+            let u = (x as f32 + 0.5) / N as f32 * 2.0 - 1.0;
+            let v = (y as f32 + 0.5) / N as f32 * 2.0 - 1.0;
+            let r2 = u * u + v * v;
+            let a = 0.6 * (((-4.5 * r2).exp() - edge) / (1.0 - edge)).max(0.0);
+            rgba.extend_from_slice(&[0, 0, 0, (a * 255.0).round() as u8]);
+        }
+    }
+    let tex = renderer.add_texture_data(
+        scene,
+        &omsi_texture::gpu::TextureData::from_image(omsi_texture::Image {
+            width: N,
+            height: N,
+            rgba,
+            has_alpha: true,
+        }),
+    );
+    let corners = [(-0.5, -0.5), (0.5, -0.5), (0.5, 0.5), (-0.5, 0.5)];
+    let mesh = omsi_geometry::MeshData {
+        positions: corners.iter().map(|&(x, y)| Vec3::new(x, y, 0.0)).collect(),
+        normals: vec![Vec3::Z; 4],
+        uvs: corners
+            .iter()
+            .map(|&(x, y)| glam::Vec2::new(x + 0.5, 0.5 - y))
+            .collect(),
+        ranges: vec![(0, 6, 0)],
+        indices: vec![0, 2, 1, 0, 3, 2],
+        one_sided: false,
+    };
+    let mat = renderer.add_material(scene, Some(tex), AlphaMode::Blend, [1.0; 4], false);
+    // drawn with the ground, before the bus: writing depth, it hid the bus floor under it
+    renderer.set_no_z_write(scene, mat, true);
+    (renderer.add_mesh(scene, &mesh), mat)
 }
 
 impl Humans {
@@ -92,7 +135,23 @@ impl Humans {
         meshes
     }
 
+    pub(super) fn add_blob(&mut self, renderer: &Renderer, scene: &mut Scene, at: DVec3) -> usize {
+        if let Some(inst) = self.gpu.spare_blobs.pop() {
+            self.gpu.hidden.retain(|h| *h != inst);
+            return inst;
+        }
+        let (mesh, mat) = *self
+            .gpu
+            .blob
+            .get_or_insert_with(|| contact_shadow(renderer, scene));
+        let inst = renderer.add_shadow_blob_instance(scene, mesh, at, Mat4::IDENTITY, vec![mat]);
+        renderer.set_params(scene, inst, &[], false, &[]);
+        inst
+    }
+
     pub(super) fn retire(&mut self, p: &Person) {
+        self.gpu.hidden.push(p.blob);
+        self.gpu.spare_blobs.push(p.blob);
         let tkey = Arc::as_ptr(&p.ty) as usize;
         for (mi, m) in p.meshes.iter().enumerate() {
             self.gpu.hidden.push(m.1);
@@ -111,11 +170,12 @@ impl Humans {
                 continue;
             }
             let p = &self.people[i];
+            let (natural, seed) = (self.natural, p.id);
             let (input, footstep) = match &p.state {
                 State::Pax(x) => {
                     let bn = x.inside.and_then(|b| f.bus(Some(b)));
-                    let own = |q: Vec3| -> Vec3 {
-                        let v = q.as_dvec3() - x.pos;
+                    let own = |q: DVec3| -> Vec3 {
+                        let v = q - x.pos;
                         let (s, c) = x.yaw.sin_cos();
                         omsi_sim::human_omsi::d3d(Vec3::new(
                             (v.x * c - v.y * s) as f32,
@@ -128,7 +188,20 @@ impl Humans {
                             .data
                             .driver_positions
                             .first()
-                            .map(|d| own(Vec3::from(d.pos) + Vec3::Z * 0.65))
+                            .map(|d| own((Vec3::from(d.pos) + Vec3::Z * 0.65).as_dvec3()))
+                    });
+                    // the waiting watch the bus come in
+                    let look = look.or_else(|| {
+                        if !natural || x.task != Task::WaitingForBus || x.inside.is_some() {
+                            return None;
+                        }
+                        f.buses()
+                            .iter()
+                            .filter(|b| b.speed.abs() > 0.5)
+                            .map(|b| (b, (b.pos - x.pos).truncate().length()))
+                            .filter(|(_, d)| *d < 70.0)
+                            .min_by(|a, b| a.1.total_cmp(&b.1))
+                            .map(|(b, _)| own(b.pos + DVec3::Z * 1.5))
                     });
                     let pack = bn.and_then(|b| {
                         x.step_pack
@@ -141,14 +214,16 @@ impl Humans {
                         moved: x.moved,
                         room_height: x.room,
                         seat_height: x.seat_h,
-                        reach: (x.reach && x.inside.is_some()).then(|| own(x.reach_at)),
+                        reach: (x.reach && x.inside.is_some()).then(|| own(x.reach_at.as_dvec3())),
                         look,
                         smooth: x.smooth,
                         dt_ms: dt * 1000.0,
+                        natural,
+                        seed,
                     };
                     (input, pack)
                 }
-                _ => (walk_input(p.vel.length() as f32, dt), None),
+                _ => (walk_input(p.vel.length() as f32, dt, natural, seed), None),
             };
             let p = &mut self.people[i];
             let ev = p.anim.advance(&p.ty.omsi, &input);
@@ -264,6 +339,18 @@ impl Humans {
             for (_, inst) in &p.meshes {
                 renderer.set_transform(scene, *inst, p.position, xf);
                 renderer.set_interior(scene, *inst, p.lit * 0.5);
+            }
+            let seated = p.anim.angles[0].abs() >= 45.0;
+            let blob = hidden != Some(true) && !seated && (p.position - from).length() < 90.0;
+            if blob != p.blob_shown {
+                p.blob_shown = blob;
+                renderer.set_params(scene, p.blob, &[], blob, &[]);
+            }
+            if blob {
+                let size = (p.ty.def.height.clamp(0.9, 2.1) / 1.75) * 0.6;
+                let stretch = 1.0 + 0.3 * (p.vel.length() as f32 / 1.5).min(1.0);
+                let scale = Mat4::from_scale(Vec3::new(size, size * 1.15 * stretch, 1.0));
+                renderer.set_transform(scene, p.blob, p.position + DVec3::Z * 0.01, xf * scale);
             }
         }
         self.pose_stats.0 += 1;

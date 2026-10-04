@@ -470,7 +470,7 @@ impl Humans {
                 } else {
                     Activity::Stand
                 };
-                walk_input(speed, dt)
+                walk_input(speed, dt, self.natural, id)
             }
             (None, None) => {
                 p.place = Place::Ground;
@@ -494,7 +494,7 @@ impl Humans {
                 } else {
                     Activity::Stand
                 };
-                walk_input(speed, dt)
+                walk_input(speed, dt, self.natural, id)
             }
         };
         p.anim.advance(&p.ty.omsi, &input);

@@ -160,7 +160,8 @@ impl Humans {
             if let (None, Some(alts)) = (kind, self.alternates.get(&slot_key(&t.def.path))) {
                 let weight = |t: &HumanType| t.def.weight.unwrap_or(1.0) as f64;
                 let alts = alts.clone();
-                let mut left = self.rand_f() * (1.0 + alts.iter().map(|a| weight(a)).sum::<f64>());
+                let all = weight(&t) + alts.iter().map(|a| weight(a)).sum::<f64>();
+                let mut left = self.rand_f() * all;
                 for a in alts {
                     left -= weight(&a);
                     if left < 0.0 {

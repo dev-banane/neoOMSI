@@ -180,7 +180,7 @@ impl Humans {
             Vec::new()
         };
         log::debug!(
-            "stop {id} '{name}': {} waiting places, {} destinations",
+            "stop {id} '{name}' at {pos:.1}, heading {heading:.0}: {} waiting places, {} destinations",
             spots.len(),
             lines.len()
         );

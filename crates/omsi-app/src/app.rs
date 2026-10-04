@@ -835,6 +835,7 @@ impl App {
                     }
                     h.exact_fare = self.settings.exact_fare;
                     h.boarding = self.settings.boarding.clone();
+                    h.natural = self.settings.pax_motion != "omsi";
                     h.voices = match self.settings.pax_voices.as_str() {
                         "off" => 2,
                         "tickets" => 1,

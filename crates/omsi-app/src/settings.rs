@@ -107,6 +107,8 @@ pub struct Settings {
     /// Which people the passengers are: `omsi` (the installation's) or `realistic` (the
     /// RealisticPax pack in the content folder's `Packs`, laid over them).
     pub pax_models: String,
+    /// How passengers move: `natural` or `omsi` (exactly as OMSI 2 animates them).
+    pub pax_motion: String,
     /// OMSI 2's route arrows over the road (as well as or instead of the navigator).
     pub nav_arrows: bool,
     /// The other (AI) vehicles as dots on the navigator's and the city map.
@@ -355,6 +357,7 @@ impl Settings {
             units: "metric".into(),
             pax_voices: "all".into(),
             pax_models: "omsi".into(),
+            pax_motion: "natural".into(),
             nav_arrows: false,
             nav_ai: true,
             nav_topbar: true,
@@ -587,6 +590,12 @@ impl Settings {
                     s.pax_models = match v.to_ascii_lowercase().as_str() {
                         "realistic" => "realistic".into(),
                         _ => "omsi".into(),
+                    }
+                }
+                "pax_motion" => {
+                    s.pax_motion = match v.to_ascii_lowercase().as_str() {
+                        "omsi" => "omsi".into(),
+                        _ => "natural".into(),
                     }
                 }
                 "nav_arrows" => s.nav_arrows = b(v),
@@ -1001,6 +1010,7 @@ impl Settings {
         ));
         text.push_str(&format!("auto_shift={}\n", self.auto_shift as u8));
         text.push_str(&format!("pax_models={}\n", self.pax_models));
+        text.push_str(&format!("pax_motion={}\n", self.pax_motion));
         text
     }
 
@@ -1262,8 +1272,11 @@ mod tests {
         assert_eq!(Settings::default().pax_models, "omsi");
         assert_eq!(Settings::from_text("pax_models=Realistic\n").pax_models, "realistic");
         assert_eq!(Settings::from_text("pax_models=other\n").pax_models, "omsi");
+        assert_eq!(Settings::default().pax_motion, "natural");
+        assert_eq!(Settings::from_text("pax_motion=OMSI\n").pax_motion, "omsi");
         let s = Settings {
             pax_models: "realistic".into(),
+            pax_motion: "omsi".into(),
             ..Default::default()
         };
         assert_eq!(Settings::from_text(&s.to_text()), s);

@@ -1,5 +1,6 @@
 //! Passengers as Omsi.exe runs them (sub_62a6a0). They do not avoid each other: somebody
-//! within 0.6 m in front stops them (sub_626860).
+//! within 0.6 m in front stops them (sub_626860). The natural style adds on top: a pace of
+//! their own, eased starts and turns, room for each other outside and a run for the bus.
 
 use super::*;
 
@@ -111,6 +112,9 @@ pub(super) struct Pax {
     pub(super) complaint: u8,
     pub(super) bad_at: [f32; 3],
     pub(super) moved: f32,
+    pub(super) react: f32,
+    pub(super) avoid: DVec2,
+    pub(super) door_wait: f32,
 }
 
 impl Pax {
@@ -166,6 +170,9 @@ impl Pax {
             complaint: 0,
             bad_at: [0.0; 3],
             moved: 0.0,
+            react: -1.0,
+            avoid: DVec2::ZERO,
+            door_wait: 0.0,
         }
     }
 
@@ -185,6 +192,45 @@ impl Pax {
         self.st = Move::Path;
         self.pax_state = 1;
     }
+}
+
+fn run_speed(age: f32, id: u32) -> f32 {
+    let base = match age {
+        a if a < 13.0 => 2.4,
+        a if a < 40.0 => 3.0,
+        _ => 2.5,
+    };
+    base + 0.5 * person_hash(id, 4) as f32
+}
+
+fn least_busy_entry(
+    points: &[Vec3],
+    here: Vec3,
+    list: &[Option<usize>],
+    buyer: bool,
+    flags: &[(bool, bool)],
+    open: &[bool],
+    queue: &[f32],
+) -> Option<usize> {
+    let pick = |buyer: bool| {
+        list.iter()
+            .enumerate()
+            .filter_map(|(k, pt)| {
+                let pt = (*pt)?;
+                let q = *points.get(pt)?;
+                let (sells_not, button) = flags.get(k).copied().unwrap_or((false, false));
+                if (!open.get(k).copied().unwrap_or(false) && !button) || (buyer && sells_not) {
+                    return None;
+                }
+                let d = here - q;
+                let walk = Vec3::new(d.x, d.y, d.z * 5.0).length();
+                let sale = if !buyer && !sells_not { 4.0 } else { 0.0 };
+                Some((walk + sale + queue.get(k).copied().unwrap_or(0.0), pt))
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|c| c.1)
+    };
+    pick(buyer).or_else(|| if buyer { pick(false) } else { None })
 }
 
 fn wrap(mut a: f64) -> f64 {
@@ -381,6 +427,9 @@ impl Humans {
         if p.timer > 0.0 {
             p.timer -= dt;
         }
+        if p.react > 0.0 {
+            p.react = (p.react - dt).max(0.0);
+        }
         // the toll of a bad ride eases off by 0.2 a kilometre
         p.discomfort = match f.bus(p.inside) {
             Some(bn) => (p.discomfort - bn.speed.abs() as f32 * dt / 5000.0).max(0.0),
@@ -476,6 +525,18 @@ impl Humans {
             room = OUTSIDE_ROOM;
         }
         let dist = d.length() as f32;
+        let (age, id) = (self.people[i].age, self.people[i].id);
+        let natural = self.natural;
+        let late = natural
+            && p0.inside.is_none()
+            && matches!(p0.task, Task::ToBus | Task::WalkingToBus)
+            && bn_t.is_some_and(|bn| bn.speed.abs() < 0.5)
+            && dist > 6.0;
+        let pace = match late {
+            false => p0.walk_speed,
+            true if age < 60.0 && person_hash(id, 3) < 0.75 => run_speed(age, id),
+            true => p0.walk_speed * 1.15,
+        };
         let (mut st, mut pt, mut link) = (p0.st, p0.pt, p0.link);
         match st {
             Move::Path if p0.pt == p0.pt_target && dist <= 0.7 && p0.short => {
@@ -549,7 +610,7 @@ impl Humans {
                     let h = d.truncate().length();
                     slope = if h > 0.0 { d.z / h } else { f64::INFINITY };
                 }
-                p.speed_des = if block < 2 { p.walk_speed } else { 0.0 };
+                p.speed_des = if block < 2 { pace } else { 0.0 };
                 yaw_of(d.truncate())
             }
             Move::AtTarget | Move::PathEnd => p.target_yaw,
@@ -569,14 +630,33 @@ impl Humans {
         if st == Move::ToTarget && p.free_r && p.block == 2 {
             dh = -1.745;
         }
-        if st != Move::Turn {
+        if st != Move::Turn && natural {
+            if st == Move::ToTarget || (st == Move::Path && p.pt == p.pt_target) {
+                let left = if p.short { dist - 0.7 } else { dist };
+                p.speed_des = p.speed_des.min((4.0 * left.max(0.0)).sqrt() + 0.1);
+            }
+            p.speed_des *= (dh.cos() as f32).max(0.0);
+            let rate = match () {
+                _ if block >= 2 => 5.0,
+                _ if p.speed_des < p.speed => 3.0,
+                _ if late => 3.0,
+                _ => 1.8,
+            };
+            let diff = p.speed_des - p.speed;
+            p.speed += diff.signum() * diff.abs().min(rate * dt);
+        } else if st != Move::Turn {
             if dh.abs() > 1.0 {
                 p.speed = 0.0;
             }
             let diff = p.speed_des - p.speed;
             p.speed += diff.signum() * diff.abs().min(5.0 * dt_ms / 1000.0);
         }
-        p.yaw = wrap(p.yaw + dh.signum() * dh.abs().min(dt_ms as f64 / 150.0));
+        let turn = if natural {
+            (dh.abs() * (dt as f64 / 0.12).min(1.0)).min(4.5 * dt as f64)
+        } else {
+            dh.abs().min(dt_ms as f64 / 150.0)
+        };
+        p.yaw = wrap(p.yaw + dh.signum() * turn);
         if st == Move::Turn {
             return;
         }
@@ -716,10 +796,19 @@ impl Humans {
                 }
                 self.pax_mut(i).unwrap().spot = None;
                 if t == Task::ToBus {
-                    let gather = stop.and_then(|s| self.stops.get(&s)).map(|s| s.gather);
+                    // spread along the kerb, not all onto one point
+                    let off = match self.natural {
+                        true => 1.8 * (2.0 * person_hash(self.people[i].id, 5) - 1.0),
+                        false => 0.0,
+                    };
+                    let gather = stop.and_then(|s| self.stops.get(&s)).map(|s| {
+                        let along = s.heading.to_radians();
+                        s.gather + DVec3::new(along.sin(), along.cos(), 0.0) * off
+                    });
                     let p = self.pax_mut(i).unwrap();
                     p.target = gather.unwrap_or(p.target);
                     p.target_bus = false;
+                    p.react = -1.0;
                 } else {
                     self.choose_entry(i, f);
                     self.pax_mut(i).unwrap().target_bus = true;
@@ -782,6 +871,7 @@ impl Humans {
                 let exits = bn.cabin.exit_points();
                 let p = self.pax_mut(i).unwrap();
                 p.walking_in();
+                p.door_wait = 0.0;
                 p.pt = start;
                 if let Some(q) = start.and_then(|k| bn.cabin.points.get(k)) {
                     p.pos = q.as_dvec3();
@@ -871,20 +961,99 @@ impl Humans {
         let open: Vec<bool> = (0..list.len())
             .map(|k| bn.entry_open.get(k.min(7)).copied().unwrap_or(false))
             .collect();
-        let pt = bn.cabin.omsi_nearest(
-            here,
-            &list,
-            p.ticket == Ticket::Buy,
-            false,
-            Some(&bn.cabin.entry_flags()),
-            Some(&open),
-        );
+        let flags = bn.cabin.entry_flags();
+        let buyer = p.ticket == Ticket::Buy;
+        let spread = self.natural.then(|| self.door_queues(i, bn.id, list.len()));
+        let pt = spread
+            .and_then(|q| least_busy_entry(&bn.cabin.points, here, &list, buyer, &flags, &open, &q))
+            .or_else(|| {
+                bn.cabin
+                    .omsi_nearest(here, &list, buyer, false, Some(&flags), Some(&open))
+            });
         let p = self.pax_mut(i).unwrap();
         if let Some(q) = pt.and_then(|k| bn.cabin.points.get(k)) {
             p.target = q.as_dvec3();
             p.target_bus = true;
         }
         p.door = pt.and_then(|t| list.iter().position(|e| *e == Some(t)));
+    }
+
+    /// Metres of detour worth taking to another door, per person already headed to this one.
+    fn door_queues(&self, i: usize, bus: BusId, n: usize) -> Vec<f32> {
+        let mut q = vec![0.0f32; n];
+        for (j, o) in self.people.iter().enumerate() {
+            let State::Pax(x) = &o.state else { continue };
+            if j != i && x.bus == Some(bus) && x.task == Task::WalkingToBus && x.inside.is_none() {
+                if let Some(d) = x.door.filter(|d| *d < n) {
+                    q[d] += 2.0;
+                }
+            }
+        }
+        let id = self.people[i].id;
+        for (d, q) in q.iter_mut().enumerate() {
+            *q += 3.0 * (person_hash(id, 20 + d as u32) as f32 - 0.5);
+        }
+        // a door once chosen is kept unless another is clearly better
+        if let Some(d) = self.pax(i).and_then(|p| p.door).filter(|d| *d < n) {
+            q[d] -= 1.5;
+        }
+        q
+    }
+
+    pub(super) fn pax_room(&mut self, dt: f32, f: &Frame) {
+        if !self.natural || dt <= 0.0 {
+            return;
+        }
+        let dt = dt as f64;
+        let mut walkers = Vec::new();
+        let mut movers = Vec::new();
+        for (i, p) in self.people.iter().enumerate() {
+            if p.place != Place::Ground || p.remote {
+                continue;
+            }
+            let mut w = Walker {
+                pos: p.position.truncate(),
+                vel: p.vel,
+                radius: 0.26,
+                want: p.vel,
+                give: 0.7,
+                fixed: true,
+                ghost: false,
+                corridor: None,
+            };
+            match &p.state {
+                State::Pax(x) if x.inside.is_none() && x.pax_state != 2 && x.speed > 0.05 => {
+                    let tgt = match x.target_bus {
+                        true => f.bus(x.bus).map_or(x.target, |bn| bn.world(x.target.as_vec3())),
+                        false => x.target,
+                    };
+                    w.fixed = false;
+                    w.ghost = (tgt - x.pos).truncate().length() < 0.8;
+                    w.pos -= p.vel * dt;
+                    w.vel = p.vel + x.avoid;
+                    movers.push((walkers.len(), i));
+                }
+                _ => {}
+            }
+            walkers.push(w);
+        }
+        if movers.is_empty() {
+            return;
+        }
+        crowd::step(&mut walkers, &[], &CrowdParams::default(), dt);
+        for (k, i) in movers {
+            let w = walkers[k];
+            let want = self.people[i].vel;
+            let shift = w.pos - self.people[i].position.truncate();
+            let Some(x) = self.pax_mut(i) else { continue };
+            if w.ghost {
+                x.avoid = DVec2::ZERO;
+                continue;
+            }
+            x.avoid = (w.vel - want).clamp_length_max(0.8);
+            x.pos += shift.extend(0.0);
+            self.people[i].position += shift.extend(0.0);
+        }
     }
 
     pub(super) fn route_to_place(&mut self, i: usize, bn: &BusNow) {
@@ -924,6 +1093,17 @@ impl Humans {
                 self.pax_mut(i).unwrap().bus = Some(bn.id);
                 // still rolling in, or standing in the stop's box: to the gather point
                 if bn.speed.abs() > 2.0 || self.in_stop_box(stop, bn.id) {
+                    if self.natural {
+                        let (id, age) = (self.people[i].id, self.people[i].age);
+                        let p = self.pax_mut(i).unwrap();
+                        if p.react < 0.0 {
+                            let slow = if age >= 65.0 { 0.8 } else { 0.0 };
+                            p.react = 0.3 + 1.4 * person_hash(id, 6) as f32 + slow;
+                        }
+                        if p.react > 0.0 {
+                            return;
+                        }
+                    }
                     self.set_task(i, Task::ToBus, f);
                 }
             }
@@ -1134,12 +1314,21 @@ impl Humans {
                 let open: Vec<bool> = (0..exits.len())
                     .map(|k| bn.exit_open.get(k.min(7)).copied().unwrap_or(false))
                     .collect();
+                let buttons = vec![(false, true); exits.len()];
+                let natural = self.natural;
                 let p = self.pax_mut(i).unwrap();
                 p.timer = 1.0;
+                let at_shut = !door_open && matches!(p.st, Move::PathEnd | Move::ShortOfPathEnd);
+                if at_shut {
+                    p.door_wait += 1.0;
+                } else if p.door_wait < 5.0 {
+                    p.door_wait = 0.0;
+                }
+                let flags = (natural && p.door_wait < 5.0).then_some(buttons.as_slice());
                 let here = p.pos.as_vec3();
                 let target = bn
                     .cabin
-                    .omsi_nearest(here, &exits, false, false, None, Some(&open));
+                    .omsi_nearest(here, &exits, false, false, flags, Some(&open));
                 if p.st == Move::Path {
                     // walking: on from the point walked to, towards the new door
                     p.pt_target = target;
@@ -1205,5 +1394,47 @@ impl Humans {
             }
             None => State::Standing,
         };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_queue_at_a_door_sends_people_to_the_next() {
+        let points = [Vec3::new(1.5, 5.0, 0.3), Vec3::new(1.5, -1.0, 0.3), Vec3::new(1.5, -6.0, 0.3)];
+        let list = [Some(0), Some(1), Some(2)];
+        let here = Vec3::new(3.0, 4.0, 0.0);
+        let flags = [(false, false), (true, false), (true, true)];
+        let open = [true, true, false];
+        let pick = |q: &[f32], buyer| least_busy_entry(&points, here, &list, buyer, &flags, &open, q);
+        assert_eq!(pick(&[0.0; 3], true), Some(0));
+        // who needs no ticket takes a door without the queue at the driver's
+        assert_eq!(pick(&[0.0; 3], false), Some(1));
+        assert_eq!(pick(&[0.0, 5.0, 9.0], false), Some(0));
+        assert_eq!(pick(&[3.0 * 1.6, 0.0, 0.0], false), Some(1));
+        // only the front door sells tickets, and a shut door with a button still counts
+        assert_eq!(pick(&[3.0 * 1.6, 0.0, 0.0], true), Some(0));
+        assert_eq!(pick(&[9.0, 9.0, 0.0], false), Some(2));
+        let shut = [false; 3];
+        assert_eq!(least_busy_entry(&points, here, &list, false, &flags, &shut, &[0.0; 3]), Some(2));
+    }
+
+    #[test]
+    fn natural_paces_follow_age_and_height() {
+        let person = |age: Option<i32>, height: f32| omsi_content::Human {
+            age,
+            height,
+            ..Default::default()
+        };
+        let adult = natural_pace(&person(None, 1.75), 1.1);
+        let (old, child) = (natural_pace(&person(Some(78), 1.7), 1.1), natural_pace(&person(Some(8), 1.3), 1.1));
+        assert!((1.3..1.4).contains(&adult), "{adult}");
+        assert!(old < child && child < adult, "{old} {child} {adult}");
+        assert!(natural_pace(&person(None, 1.9), 1.1) > natural_pace(&person(None, 1.6), 1.1));
+        // Omsi.exe's draw keeps everybody a little different
+        let (slow, quick) = (natural_pace(&person(None, 1.75), 0.9), natural_pace(&person(None, 1.75), 1.3));
+        assert!(quick / slow > 1.15 && quick / slow < 1.25, "{slow} {quick}");
     }
 }

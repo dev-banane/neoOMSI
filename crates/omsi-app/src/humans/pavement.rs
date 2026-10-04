@@ -838,9 +838,13 @@ impl Humans {
                 let pick = self.rand();
                 let next = ped
                     .as_ref()
-                    .and_then(|p| {
-                        p.end_node(net, &leg)
-                            .and_then(|n| p.next_leg(net, n, leg.lane, pick))
+                    .and_then(|p| match p.end_node(net, &leg) {
+                        Some(n) => p.next_leg(net, n, leg.lane, pick),
+                        None => Some(Leg {
+                            lane: leg.lane,
+                            a: leg.b,
+                            b: if pick % 2 == 0 { 0.0 } else { net.lanes[leg.lane].length() as f32 },
+                        }),
                     })
                     .unwrap_or(leg.reversed());
                 walk.legs.push(next);

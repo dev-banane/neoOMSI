@@ -137,6 +137,8 @@ pub struct Person {
     since_posed: u32,
     avatar: bool,
     remote: bool,
+    blob: usize,
+    blob_shown: bool,
 }
 
 impl Person {
@@ -177,6 +179,8 @@ struct Gpu {
     materials: HashMap<(usize, usize, usize), Vec<MaterialId>>,
     spare: HashMap<(usize, usize, usize), Vec<(MeshId, usize)>>,
     hidden: Vec<usize>,
+    blob: Option<(MeshId, MaterialId)>,
+    spare_blobs: Vec<usize>,
 }
 
 pub struct Humans {
@@ -252,6 +256,7 @@ pub struct Humans {
     pub lan_centers: Vec<DVec3>,
     placed_now: Vec<BusNow>,
     comfort: RideComfort,
+    pub natural: bool,
 }
 
 impl Humans {
@@ -329,6 +334,7 @@ impl Humans {
             lan_centers: Vec::new(),
             placed_now: Vec::new(),
             comfort: RideComfort::default(),
+            natural: false,
         }
     }
 
@@ -415,7 +421,7 @@ impl Humans {
         scene: &mut Scene,
         mut position: DVec3,
         heading: f64,
-        state: State,
+        mut state: State,
         kind: Option<usize>,
     ) -> Option<usize> {
         self.use_map_humans(world);
@@ -430,7 +436,14 @@ impl Humans {
         }
         let (ty, variant) = self.pick_figure(position, kind);
         let meshes = self.add_meshes(world, renderer, scene, &ty, variant, position);
-        let pace = self.walk_pace();
+        let blob = self.add_blob(renderer, scene, position);
+        let mut pace = self.walk_pace();
+        if self.natural {
+            pace = natural_pace(&ty.def, pace);
+            if let State::Pax(x) = &mut state {
+                x.walk_speed = pace as f32;
+            }
+        }
         let id = self.next_id;
         self.next_id += 1;
         log::debug!(
@@ -471,6 +484,8 @@ impl Humans {
             since_posed: 0,
             avatar: false,
             remote: false,
+            blob,
+            blob_shown: false,
         });
         Some(self.people.len() - 1)
     }
@@ -649,6 +664,7 @@ impl Humans {
         let mut remove: Vec<usize> = Vec::new();
         self.pax_frame(dt, &f, renderer, scene, &mut taken_ticket, &mut remove);
         self.walk_pedestrians(dt, &f, net, traffic, &mut remove);
+        self.pax_room(dt, &f);
         self.animate(dt, &f);
         remove.sort_unstable();
         remove.dedup();
@@ -662,4 +678,31 @@ impl Humans {
 
 fn wrap_heading(h: f64) -> f64 {
     h.rem_euclid(360.0)
+}
+
+/// 0..1, the same for a person on every machine of a LAN game.
+fn person_hash(id: u32, n: u32) -> f64 {
+    let mut x = (id as u64) << 32 | n as u64;
+    x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    x ^= x >> 31;
+    (x >> 11) as f64 / (1u64 << 53) as f64
+}
+
+/// Walking speed by age and height, `omsi` (Omsi.exe's 0.9..1.3 m/s draw) setting where in
+/// the range a person is: about 1.35 m/s for an adult, 1.0 at 75, 1.1 for a young child.
+fn natural_pace(def: &omsi_content::Human, omsi: f64) -> f64 {
+    let age = def.age.map_or(40.0, |a| a as f64);
+    let by_age = match age {
+        a if a < 8.0 => 1.0,
+        a if a < 13.0 => 1.0 + (a - 8.0) * 0.06,
+        a if a < 60.0 => 1.35,
+        a => (1.35 - (a - 60.0) * 0.022).max(0.8),
+    };
+    let tall = if age >= 13.0 && def.height > 1.0 {
+        (def.height as f64 / 1.75).sqrt().clamp(0.9, 1.07)
+    } else {
+        1.0
+    };
+    by_age * tall * (1.0 + 0.5 * (omsi - 1.1))
 }

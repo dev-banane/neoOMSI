@@ -1,4 +1,5 @@
 """python build.py --omsi "<OMSI 2 folder>" [--out <pack folder>] [--blender <blender.exe>] [--size 1024] [--jobs N]
+[--only <slot .hum>] [--hums-only]
 """
 
 import argparse
@@ -59,7 +60,45 @@ def replace_values(lines, keyword, new):
     lines.extend(["", keyword] + new)
 
 
-def write_hum(stock_path, out_path, model, info, weight, age=None, walk=None):
+def voice_for(female, age, stock):
+    """The ticket packs' voices: F1-F4 and M1-M4 adults (M4 the youngest, M3 the deepest),
+    FY1 and MY1 children, FO1 an old woman; there is no old man's."""
+    if age <= 14:
+        return "FY1" if female else "MY1"
+    if age >= 60:
+        return "FO1" if female else "M3"
+    if age < 20 and not female:
+        return "M4"
+    if stock in ("MY1", "FY1", "FO1"):
+        return "F2" if female else "M2"
+    return stock
+
+
+def figure_meta(stock_text, source, weight, person):
+    """What the .hum says about the figure beyond its body: how often it comes up, and an age
+    (tickets) and voice that fit it rather than the stock person whose place it takes."""
+    lines = stock_text.splitlines()
+    found = dict((k, i) for i, k in blocks(stock_text))
+    stock_voice = values(lines, found["[voice]"], 1)[0] if "[voice]" in found else ""
+    stock_age = int(values(lines, found["[age]"], 1)[0]) if "[age]" in found else None
+    if person:
+        female = person["spec"]["phenotype"]["gender"] < 0.5
+        age = person["age"]
+    else:
+        female = "Female" in source
+        age = stock_age if source.startswith("Children/") and stock_age else 35
+    meta = [("[neo_weight]", [f"{weight:g}"])] if weight != 1.0 else []
+    if age != stock_age and (person or stock_age is not None):
+        meta.append(("[age]", [str(age)]))
+    voice = voice_for(female, age, stock_voice)
+    if stock_voice and voice != stock_voice:
+        meta.append(("[voice]", [voice]))
+    if person and person.get("walk"):
+        meta.append(("[walk_param]", [f"{v:g}" for v in person["walk"]]))
+    return meta
+
+
+def write_hum(stock_path, out_path, model, info, meta):
     text = stock_path.read_bytes().decode("cp1252")
     lines = text.splitlines()
     found = dict((k, i) for i, k in blocks(text))
@@ -73,13 +112,21 @@ def write_hum(stock_path, out_path, model, info, weight, age=None, walk=None):
     if seat > 0.2:
         # keep the stock hip-above-seat lift so the new body sits as deep as the old one did
         replace_values(lines, "[seatheight]", [f"{links[2] - (stock_links[2] - seat):.2f}"])
-    if weight != 1.0:
-        replace_values(lines, "[neo_weight]", [f"{weight:g}"])
-    if age is not None:
-        replace_values(lines, "[age]", [str(age)])
-    if walk:
-        replace_values(lines, "[walk_param]", [f"{v:g}" for v in walk])
+    for keyword, new in meta:
+        replace_values(lines, keyword, new)
     out_path.write_bytes(("\r\n".join(lines) + "\r\n").encode("cp1252"))
+
+
+def rewrite_hum(stock_path, out_path, source, weight, person):
+    """Only the figure's metadata into a .hum built before: no Blender needed."""
+    lines = out_path.read_bytes().decode("cp1252").splitlines()
+    meta = figure_meta(stock_path.read_bytes().decode("cp1252"), source, weight, person)
+    if weight == 1.0 and any(line.strip().lower() == "[neo_weight]" for line in lines):
+        meta.append(("[neo_weight]", ["1"]))
+    for keyword, new in meta:
+        replace_values(lines, keyword, new)
+    out_path.write_bytes(("\r\n".join(lines) + "\r\n").encode("cp1252"))
+    return f"{out_path.relative_to(out_path.parents[2])} <- {source}"
 
 
 def write_cfg(path, meshes, textures, alpha, ctc):
@@ -268,8 +315,8 @@ def build_figure(args, blender, stock, hum_out, source, weight, person=None):
         write_variants(sources[body], model_dir / "variants", args.size)
         ctc = (f"{model_rel}\\variants", body)
     write_cfg(model_dir / f"{name}.cfg", [lv["file"] for lv in info["levels"]], textures, alpha, ctc)
-    write_hum(stock, hum_out, f"{model_rel}\\{name}.cfg", info, weight,
-              person.get("age") if person else None, person.get("walk") if person else None)
+    meta = figure_meta(stock.read_bytes().decode("cp1252"), source, weight, person)
+    write_hum(stock, hum_out, f"{model_rel}\\{name}.cfg", info, meta)
     tris = " / ".join(str(lv["triangles"]) for lv in info["levels"])
     return f"{hum_out.relative_to(args.out)} <- {source}: {tris} triangles, {info['height']} m"
 
@@ -282,8 +329,10 @@ def main():
     ap.add_argument("--size", type=int, default=1024)
     ap.add_argument("--jobs", type=int, default=max(1, min(6, (os.cpu_count() or 2) // 2)))
     ap.add_argument("--only", help="build just this slot (a .hum as named in pax.json)")
+    ap.add_argument("--hums-only", action="store_true",
+                    help="rewrite only the weights, ages and voices of a pack built before")
     args = ap.parse_args()
-    blender = find_blender(args.blender)
+    blender = None if args.hums_only else find_blender(args.blender)
     pax = json.loads((HERE / "pax.json").read_text())
 
     work = []
@@ -294,7 +343,7 @@ def main():
         if not stock.exists():
             print(f"skip {hum}: not in {args.omsi}")
             continue
-        work.append((stock, args.out / hum, avatar, 1.0))
+        work.append((stock, args.out / hum, avatar, weight_of(avatar, pax["weights"])))
         for alt in pax["alternates"].get(hum, []):
             out = args.out / hum
             out = out.with_name(f"{out.stem}~{alt.rsplit('/', 1)[1]}.hum")
@@ -308,6 +357,10 @@ def main():
         work.append((args.omsi / hum, out, f"generated/{person['name']}",
                      person.get("weight", 1.0), person))
 
+    if args.hums_only:
+        for stock, out, source, weight, *person in work:
+            print(rewrite_hum(stock, out, source, weight, person[0] if person else None))
+        return
     failed = False
     with concurrent.futures.ThreadPoolExecutor(args.jobs) as pool:
         jobs = [pool.submit(build_figure, args, blender, *w) for w in work]

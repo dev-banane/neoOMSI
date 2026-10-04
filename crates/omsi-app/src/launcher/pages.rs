@@ -1888,6 +1888,16 @@ fn gameplay_tab(ui: &mut Ui, s: &mut Value, dirty: &mut f32, cols: [Rect; 2]) ->
         "pax_models",
         &[("omsi", "OMSI 2"), ("realistic", "Realistic")],
     );
+    sel_setting(
+        ui,
+        s,
+        dirty,
+        "s-paxmotion",
+        c.row(),
+        "Passenger movement",
+        "pax_motion",
+        &[("natural", "Natural"), ("omsi", "OMSI 2")],
+    );
     c.section(ui, "Traffic");
     sel_setting(
         ui,
@@ -5059,6 +5069,7 @@ mod settings_tests {
             "set-exact_fare",
             "s-pax",
             "s-paxmodels",
+            "s-paxmotion",
             "s-unsched",
             "s-maxsched",
             "s-maxpark",

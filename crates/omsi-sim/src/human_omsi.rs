@@ -86,6 +86,10 @@ impl DMat {
         DMat(o)
     }
 
+    pub fn inverse(&self) -> DMat {
+        DMat(Mat4::from_cols_array_2d(&self.0).inverse().to_cols_array_2d())
+    }
+
     pub fn point(&self, p: Vec3) -> Vec3 {
         let r =
             |j: usize| p.x * self.0[0][j] + p.y * self.0[1][j] + p.z * self.0[2][j] + self.0[3][j];
@@ -205,6 +209,46 @@ fn curve(c: &[(f32, f32)], x: f32) -> f32 {
     }
 }
 
+fn arm_ik(rig: &OmsiRig, v: Vec3, fore: Vec3, a: &mut [f32; 30]) {
+    let l30 = rig.upper_arm[1].length();
+    let l34 = fore.length();
+    let l38 = v.length();
+    let c = ((l30 * l30 + l34 * l34) - l38 * l38) / (2.0 * l30 * l34);
+    let c = if c > 1.0 { 1.0 } else { c };
+    a[22] = if c > -1.0 {
+        180.0 - c.acos() / DEG
+    } else {
+        0.0
+    };
+    let c = ((l30 * l30 + l38 * l38) - l34 * l34) / (2.0 * l30 * l38);
+    let c = if c > 1.0 { 1.0 } else { c };
+    a[20] = if c > -1.0 { -(c.acos() / DEG) } else { 0.0 };
+    let arm = fore + rig.upper_arm[1];
+    let flat_arm = Vec3::new(arm.x, 0.0, arm.z);
+    let flat_v = Vec3::new(v.x, 0.0, v.z);
+    a[14] = (flat_v.z.atan2(flat_v.x) - flat_arm.z.atan2(flat_arm.x)) / DEG;
+    let s1 = (-v.y / v.length()).clamp(-1.0, 1.0).asin();
+    let s2 = (arm.y / arm.length()).clamp(-1.0, 1.0).asin();
+    a[16] = (s1 - s2) / DEG;
+}
+
+fn natural_stride(speed: f32) -> f32 {
+    (speed / 1.2).powf(0.55).min(1.9)
+}
+
+fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
+    let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+fn hash(seed: u32, n: u32) -> f32 {
+    let mut x = (seed as u64) << 32 | n as u64;
+    x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    x ^= x >> 31;
+    (x >> 40) as f32 / (1u64 << 24) as f32
+}
+
 /// Delphi's Trunc of a float (toward zero).
 fn frac(x: f32) -> f32 {
     x - x.trunc()
@@ -230,6 +274,9 @@ pub struct AnimInput {
     /// The angles ease instead of jumping (at the validator or the cash desk, sitting).
     pub smooth: bool,
     pub dt_ms: f32,
+    /// Off, exactly Omsi.exe's animation.
+    pub natural: bool,
+    pub seed: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -238,6 +285,11 @@ pub struct OmsiAnim {
     pub phase: f32,
     pub angles: [f32; 30],
     bob: f32,
+    clock: f32,
+    shown: Option<(u8, bool)>,
+    from: [f32; 30],
+    fade: f32,
+    reach_t: f32,
 }
 
 impl Default for OmsiAnim {
@@ -246,6 +298,11 @@ impl Default for OmsiAnim {
             phase: 0.0,
             angles: [0.0; 30],
             bob: 0.0,
+            clock: 0.0,
+            shown: None,
+            from: [0.0; 30],
+            fade: 1.0,
+            reach_t: 0.0,
         }
     }
 }
@@ -261,8 +318,17 @@ impl OmsiAnim {
         let mut ev = AnimEvents::default();
         let mut a = [0.0f32; 30];
         // the stride used at this speed (+0x2d8 times |v| / 1.2, at most 1)
-        let rel = (inp.speed.abs() / 1.2).min(1.0);
-        let stride = rel * rig.stride;
+        let v = inp.speed.abs();
+        let stride = if inp.natural {
+            rig.stride * natural_stride(v) * (0.93 + 0.14 * hash(inp.seed, 14))
+        } else {
+            (v / 1.2).min(1.0) * rig.stride
+        };
+        let run = if inp.natural && inp.kind == 1 {
+            smoothstep(1.9, 2.7, v)
+        } else {
+            0.0
+        };
         // stooping under a low ceiling
         let l20 = inp.room_height - rig.waist.y;
         let l24 = rig.height - rig.waist.y;
@@ -322,7 +388,19 @@ impl OmsiAnim {
                 a[12] += swing * l24 * rig.waist_bend;
                 a[29] = (2.0 * std::f32::consts::PI * p).sin() * 5.0;
                 a[10] = (2.0 * std::f32::consts::PI * p).sin() * rig.hip_turn;
-            }
+                if inp.natural {
+                    a[12] += ((v - 1.0) * 2.5).clamp(0.0, 3.0) + 7.0 * run;
+                    a[4] *= 1.0 + 0.35 * run;
+                    a[5] *= 1.0 + 0.35 * run;
+                    // both feet leave the ground before each footfall (0.2, 0.7, ...)
+                    let q = (p - 0.2).rem_euclid(0.5) / 0.5;
+                    let flight = if q > 0.4 {
+                        (std::f32::consts::PI * (q - 0.4) / 0.6).sin()
+                    } else {
+                        0.0
+                    };
+                    bob += (0.07 * rig.hip.y * flight - bob) * run;
+                }            }
             2 => {
                 let thigh = rig.thigh[0].length();
                 let l20 = (-(thigh - rig.seat_height) - inp.seat_height) + 0.1;
@@ -374,37 +452,28 @@ impl OmsiAnim {
                 a[21] = 29.0;
             }
         }
+        if run > 0.0 {
+            a[19] *= 1.0 + 0.6 * run;
+            a[21] += (80.0 + 15.0 * sin2 - a[21]) * run;
+        }
+        if inp.natural && kind == 0 {
+            self.idle(inp.seed, &mut a);
+        }
+        if inp.natural && kind == 1 {
+            self.gait(inp.seed, run, inp.reach.is_none(), &mut a);
+        }
         // the right arm
         if let Some(target) = inp.reach {
-            // the law of cosines for the elbow and the shoulder
-            let l30 = rig.upper_arm[1].length();
-            let l34 = rig.forearm[1].length();
-            let v = target - rig.shoulder;
-            let l38 = v.length();
-            let c = ((l30 * l30 + l34 * l34) - l38 * l38) / (2.0 * l30 * l34);
-            let c = if c > 1.0 { 1.0 } else { c };
-            a[22] = if c > -1.0 {
-                180.0 - c.acos() / DEG
+            if inp.natural {
+                self.reach_t = if self.shown.is_some_and(|s| s.1) {
+                    self.reach_t + inp.dt_ms / 1000.0
+                } else {
+                    0.0
+                };
+                self.natural_reach(rig, target, bob, &mut a);
             } else {
-                0.0
-            };
-            let c = ((l30 * l30 + l38 * l38) - l34 * l34) / (2.0 * l30 * l38);
-            let c = if c > 1.0 { 1.0 } else { c };
-            a[20] = if c > -1.0 { -(c.acos() / DEG) } else { 0.0 };
-            let arm = rig.forearm[1] + rig.upper_arm[1];
-            let flat_arm = Vec3::new(arm.x, 0.0, arm.z);
-            let l44 = flat_arm.length();
-            let flat_v = Vec3::new(v.x, 0.0, v.z);
-            let l48 = flat_v.length();
-            // signed: with the law of cosines' bare angle a hand reaching for the money tray went up
-            // beside the head (a raised-arm salute at every cash desk)
-            let _ = (l44, l48);
-            a[14] = (flat_v.z.atan2(flat_v.x) - flat_arm.z.atan2(flat_arm.x)) / DEG;
-            let l58 = arm.length();
-            let l5c = v.length();
-            let s1 = (-v.y / l5c).clamp(-1.0, 1.0).asin();
-            let s2 = (arm.y / l58).clamp(-1.0, 1.0).asin();
-            a[16] = (s1 - s2) / DEG;
+                arm_ik(rig, target - rig.shoulder, rig.forearm[1], &mut a);
+            }
         } else {
             match kind {
                 2 => {
@@ -423,6 +492,10 @@ impl OmsiAnim {
                     a[18] = -30.0;
                     a[20] = (-sin2 - 0.2) * (upright * rig.arm_swing * swing) + stoop * 0.5;
                     a[22] = (-sin2 + 1.0) * (upright * rig.arm_swing * swing) * 1.2;
+                    if run > 0.0 {
+                        a[20] *= 1.0 + 0.6 * run;
+                        a[22] += (80.0 - 15.0 * sin2 - a[22]) * run;
+                    }
                 }
                 _ => {
                     a[14] = -3.0;
@@ -440,21 +513,143 @@ impl OmsiAnim {
                 let l = v.length();
                 a[6] = (v.x / l).clamp(-1.0, 1.0).asin() / DEG;
                 a[7] = -((v.y / l).clamp(-1.0, 1.0).asin() / DEG);
+                if inp.natural {
+                    a[6] = a[6].clamp(-70.0, 70.0);
+                    a[29] = 0.25 * a[6];
+                }
             }
         }
+        let shown = (kind, inp.reach.is_some());
+        if inp.natural && !inp.smooth && self.shown.is_some_and(|s| s != shown) {
+            self.from = self.angles;
+            self.fade = 0.0;
+        }
+        self.shown = Some(shown);
         // to the angles: at once, or easing towards them (0x628c95)
         let k = (inp.dt_ms / 1000.0 * 10.0).min(1.0);
         let lim = 18000.0 * inp.dt_ms / 1000.0;
-        for (cur, to) in self.angles.iter_mut().zip(a.iter()) {
+        let blend = if self.fade < 1.0 && !inp.smooth {
+            self.fade = (self.fade + inp.dt_ms / 350.0).min(1.0);
+            Some(smoothstep(0.0, 1.0, self.fade))
+        } else {
+            self.fade = 1.0;
+            None
+        };
+        for ((cur, to), from) in self.angles.iter_mut().zip(a.iter()).zip(self.from) {
             if inp.smooth {
                 let d = ((to - *cur) * k).clamp(-lim, lim);
                 *cur += d;
+            } else if let Some(w) = blend {
+                *cur = from + (to - from) * w;
             } else {
                 *cur = *to;
             }
         }
         self.bob = bob;
+        self.clock += inp.dt_ms / 1000.0;
         ev
+    }
+
+    fn natural_reach(&self, rig: &OmsiRig, target: Vec3, bob: f32, a: &mut [f32; 30]) {
+        let fore = rig.hand - rig.elbow;
+        let hand = (rig.finger - rig.hand).length();
+        let length = rig.upper_arm[1].length() + fore.length();
+        let mut probe = OmsiAnim {
+            bob,
+            ..OmsiAnim::default()
+        };
+        let wrist_at = |local: Vec3| {
+            let h = Vec3::new(local.x - rig.shoulder.x, 0.0, local.z - rig.shoulder.z)
+                .normalize_or(Vec3::Z);
+            let down = 30.0 * DEG;
+            local - (h * down.cos() - Vec3::Y * down.sin()) * hand
+        };
+        let mut best = (f32::MAX, 0.0, 0.0);
+        for pitch in [0.0, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0] {
+            for twist in [0.0, -6.0, 6.0, -12.0, 12.0, -18.0, 18.0] {
+                probe.angles = *a;
+                probe.angles[12] += pitch;
+                probe.angles[29] += twist;
+                let local = probe.bones_d3d(rig)[9].inverse().point(target);
+                let short = ((wrist_at(local) - rig.shoulder).length() - 0.93 * length).max(0.0);
+                let cost = pitch + 0.5 * twist.abs() + 1000.0 * short;
+                if cost < best.0 {
+                    best = (cost, pitch, twist);
+                }
+            }
+        }
+        a[12] += best.1;
+        a[29] += best.2;
+        probe.angles = *a;
+        let local = probe.bones_d3d(rig)[9].inverse().point(target);
+        arm_ik(rig, wrist_at(local) - rig.shoulder, fore, a);
+        // the hand is along x in the T-pose the bones start from: it bends about y and z
+        let press = (std::f32::consts::PI * ((self.reach_t - 0.35) / 0.5).clamp(0.0, 1.0)).sin();
+        let goal = target - Vec3::Y * 0.025 * press;
+        probe.angles = *a;
+        for (k, step) in [(26, 10.0), (28, 10.0), (26, 3.0), (28, 3.0)] {
+            let mut best = (f32::MAX, probe.angles[k]);
+            let around = probe.angles[k];
+            for n in -6..=6 {
+                probe.angles[k] = (around + n as f32 * step).clamp(-80.0, 80.0);
+                let d = (probe.bones_d3d(rig)[12].point(rig.finger) - goal).length();
+                if d < best.0 {
+                    best = (d, probe.angles[k]);
+                }
+            }
+            probe.angles[k] = best.1;
+        }
+        a[26] = probe.angles[26];
+        a[28] = probe.angles[28];
+    }
+
+    fn gait(&self, seed: u32, run: f32, right_free: bool, a: &mut [f32; 30]) {
+        let loose = (0.35 + 0.65 * hash(seed, 11).sqrt()) * (1.0 - run);
+        let tau = std::f32::consts::TAU;
+        let (s, c2) = ((tau * self.phase).sin(), (2.0 * tau * self.phase).cos());
+        let k = 1.0 - 0.25 * loose;
+        a[19] *= 0.8 + 0.4 * loose;
+        a[21] = a[21] * k + 14.0 * loose;
+        if right_free {
+            a[20] *= 0.8 + 0.4 * loose;
+            a[22] = a[22] * k + 14.0 * loose;
+        }
+        a[29] += s * 6.0 * loose;
+        a[10] *= 1.0 + loose;
+        a[4] += 5.0 * loose;
+        a[5] += 5.0 * loose;
+        a[12] += (2.5 * (hash(seed, 12) - 0.3)) * (1.0 - run);
+        a[2] += 1.5 * (hash(seed, 13) - 0.5);
+        a[3] += 1.5 * (hash(seed, 13) - 0.5);
+        a[7] += 1.5 * loose * c2;
+        let t = self.clock + 100.0 * hash(seed, 0);
+        let look = (tau * t / (5.0 + 4.0 * hash(seed, 15))).sin();
+        a[6] = 18.0 * loose * look.powi(9);
+    }
+
+    fn idle(&self, seed: u32, a: &mut [f32; 30]) {
+        let t = self.clock + 100.0 * hash(seed, 0);
+        let tau = std::f32::consts::TAU;
+        let sway = (tau * t / (7.0 + 5.0 * hash(seed, 1)) + tau * hash(seed, 2)).sin();
+        a[2] += 1.5 * sway;
+        a[3] -= 1.5 * sway;
+        a[10] += 2.0 * sway;
+        a[12] += 0.6 * (tau * t / (3.8 + hash(seed, 3))).sin();
+        a[21] += 14.0 * (hash(seed, 4) - 0.5);
+        a[22] += 14.0 * (hash(seed, 5) - 0.5);
+        let len = 2.5 + 3.5 * hash(seed, 6);
+        let epoch = (t / len).floor();
+        let glance = |e: f32| {
+            let s = seed ^ (e as i64 as u32).wrapping_mul(0x9e37_79b9);
+            let yaw = (2.0 * hash(s, 8) - 1.0) * if hash(s, 7) < 0.35 { 50.0 } else { 15.0 };
+            let down = if hash(s, 10) < 0.15 { 14.0 } else { 0.0 };
+            (yaw, (2.0 * hash(s, 9) - 1.0) * 5.0 + down)
+        };
+        let (was, now) = (glance(epoch - 1.0), glance(epoch));
+        let k = smoothstep(0.0, 0.7, t - epoch * len);
+        a[6] = was.0 + (now.0 - was.0) * k;
+        a[7] = was.1 + (now.1 - was.1) * k;
+        a[29] = 0.25 * a[6];
     }
 
     pub fn bones_d3d(&self, rig: &OmsiRig) -> [DMat; BONES] {
@@ -629,6 +824,42 @@ mod tests {
     }
 
     #[test]
+    fn a_natural_reach_bends_the_wrist_and_leans_in_when_far() {
+        let r = rig();
+        let reach = |target: Vec3, frames: usize| {
+            let mut an = OmsiAnim::default();
+            for _ in 0..frames {
+                an.advance(
+                    &r,
+                    &AnimInput {
+                        kind: 0,
+                        room_height: 50.0,
+                        dt_ms: 16.0,
+                        reach: Some(target),
+                        natural: true,
+                        ..Default::default()
+                    },
+                );
+            }
+            an
+        };
+        for target in [Vec3::new(0.25, 1.0, 0.4), Vec3::new(0.1, 1.2, 0.45), Vec3::new(0.25, 1.05, 0.62)] {
+            // past the fade in and the press
+            let an = reach(target, 60);
+            let b = an.bones_d3d(&r);
+            let tip = b[12].point(r.finger);
+            assert!((tip - target).length() < 0.05, "{target:?}: the fingers at {tip:?}");
+            assert!(an.angles[26].abs() + an.angles[28].abs() > 5.0, "{target:?}: a stiff wrist");
+            let elbow = b[5].point(r.elbow);
+            assert!(elbow.y < r.shoulder.y, "{target:?}: the elbow at {elbow:?} above the shoulder");
+        }
+        let far = reach(Vec3::new(0.25, 1.05, 0.62), 60);
+        assert!(far.angles[12] > 3.0, "{:?}", far.angles[12]);
+        let near = reach(Vec3::new(0.25, 1.0, 0.4), 60);
+        assert!(near.angles[12] < far.angles[12]);
+    }
+
+    #[test]
     fn standing_pose_keeps_the_feet_on_the_floor() {
         let r = rig();
         let mut an = OmsiAnim::default();
@@ -698,4 +929,169 @@ mod tests {
         assert!(an.angles[0] >= 60.0 && an.angles[4] >= 90.0);
         assert_eq!(an.angles[9], -20.0);
     }
+
+    fn fingerprint(input: impl Fn(usize) -> AnimInput) -> f64 {
+        let r = rig();
+        let mut an = OmsiAnim::default();
+        let mut sum = 0.0f64;
+        for k in 0..240 {
+            an.advance(&r, &input(k));
+            sum += an.angles.iter().enumerate().map(|(j, a)| (j + 1) as f64 * *a as f64).sum::<f64>();
+            sum += an.bones_d3d(&r).iter().map(|b| b.0[3][1] as f64).sum::<f64>() * 100.0;
+        }
+        sum
+    }
+
+    #[test]
+    fn the_omsi_style_is_unchanged() {
+        let walk = |speed: f32| {
+            move |k: usize| AnimInput {
+                kind: if k < 200 { 1 } else { 0 },
+                speed,
+                moved: speed * 0.016,
+                room_height: if k > 120 && k < 150 { 1.6 } else { 50.0 },
+                dt_ms: 16.0,
+                reach: (k > 210).then_some(Vec3::new(0.2, 1.0, 0.4)),
+                look: (k % 50 > 30).then_some(Vec3::new(1.0, 1.6, 2.0)),
+                smooth: k > 220,
+                ..Default::default()
+            }
+        };
+        let sit = |k: usize| AnimInput {
+            kind: 2,
+            seat_height: 0.45,
+            room_height: 50.0,
+            dt_ms: 16.0,
+            smooth: k % 2 == 0,
+            ..Default::default()
+        };
+        // recorded from Omsi.exe's animation before the natural style was added
+        for (got, want) in [
+            (fingerprint(walk(0.8)), 829341.640916),
+            (fingerprint(walk(1.6)), 908074.935841),
+            (fingerprint(walk(3.0)), 903649.967610),
+            (fingerprint(sit), 1478272.706201),
+        ] {
+            assert!((got - want).abs() < 1e-3, "{got} != {want}");
+        }
+    }
+
+    fn natural_walk(an: &mut OmsiAnim, r: &OmsiRig, speed: f32, frames: usize) -> (u32, Vec<f32>) {
+        let (mut steps, mut lowest) = (0, Vec::new());
+        for _ in 0..frames {
+            let ev = an.advance(
+                r,
+                &AnimInput {
+                    kind: 1,
+                    speed,
+                    moved: speed * 0.016,
+                    room_height: 50.0,
+                    dt_ms: 16.0,
+                    natural: true,
+                    ..Default::default()
+                },
+            );
+            steps += ev.step as u32;
+            let b = an.bones(r);
+            let ankle = Vec3::new(0.09, -0.03, 0.05);
+            let left = b[2].transform_point3(Vec3::new(-ankle.x, ankle.y, ankle.z)).z;
+            lowest.push(left.min(b[3].transform_point3(ankle).z) - ankle.z);
+        }
+        (steps, lowest)
+    }
+
+    #[test]
+    fn natural_steps_get_longer_and_quicker_with_speed() {
+        let r = rig();
+        let cadence = |speed: f32| {
+            let mut an = OmsiAnim::default();
+            natural_walk(&mut an, &r, speed, 625).0 as f32 / 10.0
+        };
+        let (slow, usual, brisk) = (cadence(0.8), cadence(1.3), cadence(1.8));
+        assert!(slow < usual && usual < brisk, "{slow} {usual} {brisk}");
+        // about 1.8 steps a second at 1.3 m/s, each about 0.7 m
+        assert!((1.6..2.0).contains(&usual), "{usual}");
+        assert!(1.3 / usual > 0.65 && 1.8 / brisk > 1.3 / usual);
+    }
+
+    #[test]
+    fn running_has_a_flight_phase_and_walking_none() {
+        let r = rig();
+        let mut an = OmsiAnim::default();
+        let (_, run) = natural_walk(&mut an, &r, 3.2, 300);
+        let airborne = run.iter().filter(|z| **z > 0.03).count();
+        assert!(airborne > 30, "{airborne} of 300 frames off the ground");
+        let mut an = OmsiAnim::default();
+        let (_, walk) = natural_walk(&mut an, &r, 1.3, 300);
+        assert!(walk.iter().all(|z| *z < 0.02), "{:?}", walk.iter().fold(0f32, |a, b| a.max(*b)));
+        let mut an = OmsiAnim::default();
+        natural_walk(&mut an, &r, 3.2, 100);
+        assert!(an.angles[21] > 60.0 && an.angles[12] > 6.0, "{:?}", an.angles);
+    }
+
+    #[test]
+    fn walking_styles_differ_from_person_to_person() {
+        let r = rig();
+        let elbow = |seed: u32| {
+            let mut an = OmsiAnim::default();
+            let mut sum = 0.0;
+            for _ in 0..200 {
+                an.advance(
+                    &r,
+                    &AnimInput {
+                        kind: 1,
+                        speed: 1.3,
+                        moved: 1.3 * 0.016,
+                        room_height: 50.0,
+                        dt_ms: 16.0,
+                        natural: true,
+                        seed,
+                        ..Default::default()
+                    },
+                );
+                sum += an.angles[21];
+            }
+            sum / 200.0
+        };
+        let all: Vec<f32> = (0..40).map(elbow).collect();
+        let (lo, hi) = all.iter().fold((f32::MAX, 0f32), |(l, h), x| (l.min(*x), h.max(*x)));
+        assert!(hi - lo > 5.0, "{lo}..{hi}");
+    }
+
+    #[test]
+    fn natural_standing_varies_and_changes_ease_in() {
+        let r = rig();
+        let stand = |seed: u32| AnimInput {
+            kind: 0,
+            room_height: 50.0,
+            dt_ms: 16.0,
+            natural: true,
+            seed,
+            ..Default::default()
+        };
+        let heads = |seed: u32| {
+            let mut an = OmsiAnim::default();
+            (0..1000)
+                .map(|_| {
+                    an.advance(&r, &stand(seed));
+                    an.angles[6]
+                })
+                .collect::<Vec<_>>()
+        };
+        let (a, b) = (heads(1), heads(2));
+        assert!(a != b);
+        let spread = a.iter().fold(0f32, |m, x| m.max(x.abs()));
+        assert!(spread > 3.0 && spread <= 50.0, "{spread}");
+        assert!(a.windows(2).all(|w| (w[1] - w[0]).abs() < 2.0), "no jumps in the glances");
+        let mut an = OmsiAnim::default();
+        natural_walk(&mut an, &r, 1.3, 40);
+        let thigh = an.angles[0];
+        an.advance(&r, &stand(1));
+        assert!((an.angles[0] - thigh).abs() < thigh.abs() * 0.2 + 0.5, "{thigh} -> {}", an.angles[0]);
+        for _ in 0..30 {
+            an.advance(&r, &stand(1));
+        }
+        assert!(an.angles[0].abs() < 1.0);
+    }
+
 }
