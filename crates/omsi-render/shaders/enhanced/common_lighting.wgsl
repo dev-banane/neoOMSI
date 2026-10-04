@@ -40,7 +40,6 @@ struct Enhanced {
 
 const PI: f32 = 3.14159265;
 
-// Irradiance from the sky and the ground on a surface facing n.
 fn sh_irradiance(n: vec3<f32>) -> vec3<f32> {
     let c = enh.sh;
     let e = c[0].rgb * 0.282095
@@ -70,7 +69,6 @@ fn sky_table(d: vec3<f32>) -> vec3<f32> {
     return sky_table_raw(d) * enh.ground.w;
 }
 
-// Henyey-Greenstein phase function.
 fn hg_phase(c: f32, g: f32) -> f32 {
     let g2 = g * g;
     return (1.0 - g2) / (4.0 * PI * pow(max(1.0 + g2 - 2.0 * g * c, 1e-4), 1.5));
@@ -100,9 +98,8 @@ fn air(dir: vec3<f32>, dist: f32, h0: f32, h1: f32) -> vec4<f32> {
 
 // The same with the clear air's share scaled (0 for the sky, whose table holds it already).
 fn air_of(dir: vec3<f32>, dist: f32, h0: f32, h1: f32, clear: f32) -> vec4<f32> {
-    let tau_fog = layer_depth(enh.fog.x, enh.fog.y, h0, h1, dist);
-    let tau_air = layer_depth(enh.fog.w * clear, 1.0 / 1500.0, h0, h1, dist);
-    let tau = tau_fog + tau_air;
+    // only the weather's fog: no haze on a clear day
+    let tau = layer_depth(enh.fog.x, enh.fog.y, h0, h1, dist);
     let t = exp(-tau);
     if (tau < 1e-5) {
         return vec4<f32>(0.0, 0.0, 0.0, 1.0);
@@ -110,8 +107,6 @@ fn air_of(dir: vec3<f32>, dist: f32, h0: f32, h1: f32, clear: f32) -> vec4<f32> 
     // clear air takes on the sky's own colour at the horizon in this direction (which
     // already holds the glow round the sun); a weather fog glows with the light around it
     // and brighter towards the sun
-    let horizon = sky_table(normalize(vec3<f32>(dir.x, dir.y, max(dir.z, 0.0) * 0.3 + 0.03)));
-    let fog_in = enh.fog_color.rgb + enh.sun.rgb * hg_phase(dot(dir, camera.sun_dir.xyz), 0.55) * 0.9;
-    let inscatter = mix(horizon, fog_in, tau_fog / tau);
+    let inscatter = enh.fog_color.rgb + enh.sun.rgb * hg_phase(dot(dir, camera.sun_dir.xyz), 0.55) * 0.9;
     return vec4<f32>(inscatter * (1.0 - t), t);
 }

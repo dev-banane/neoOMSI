@@ -13,6 +13,7 @@ pub mod atlas;
 pub mod gpu;
 pub mod i18n;
 pub mod icons;
+pub mod ingame;
 pub mod paint;
 pub mod text;
 

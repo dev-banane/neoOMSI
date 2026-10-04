@@ -123,6 +123,12 @@ pub(super) fn options_pages(app: &App) -> Vec<Page> {
             "Passenger movement",
             "Natural: own pace, gait and room for each other; OMSI 2: as the original",
         ),
+        switch_row(
+            app,
+            "pax_prefer_seats",
+            "Passengers prefer available seats",
+            "Passengers take a free seat when boarding; standing places are used when all seats are taken",
+        ),
         pick("maintenance", "Maintenance", later),
         switch_row(
             app,
@@ -186,6 +192,26 @@ pub(super) fn options_pages(app: &App) -> Vec<Page> {
             "mouse_sens",
             "Mouse steering sensitivity",
             "Adjust how much the steering wheel turns based on mouse movement",
+            &pct,
+        ),
+        slider_row(
+            app,
+            "stick_sens",
+            "Gamepad steering sensitivity",
+            "How much a small stick push turns the wheel; a full push is still full lock",
+            &pct,
+        ),
+        switch_row(
+            app,
+            "steer_center",
+            "Wheel returns to the middle",
+            "Steering a hair off the middle counts as straight",
+        ),
+        slider_row(
+            app,
+            "ctrl_deadzone",
+            "Default controller dead zone",
+            "For controllers without their own dead zone (set per device in the launcher)",
             &pct,
         ),
         slider_row(
@@ -798,7 +824,7 @@ pub(super) fn vehicle_pages(app: &App) -> Vec<Page> {
             "Put back on its wheels",
             "Reset",
             "Return the vehicle to an upright position",
-            "reset",
+            "reset_vehicle",
         ));
         service.push(button("Reload this vehicle", "Reload", "Read the vehicle's files again (.bus, model and sound configuration, scripts) and drive it from here", "reload"));
     }

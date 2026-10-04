@@ -15,14 +15,14 @@ struct VehicleBox {
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-pub(super) struct VehicleUniform {
+pub(crate) struct VehicleUniform {
     plane: [f32; 4],
     parts: [VehicleBox; 4],
 }
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-pub(super) struct Uniform {
+pub(crate) struct Uniform {
     view_proj: [[f32; 4]; 4],
     inv_view_proj: [[f32; 4]; 4],
     eye_time: [f32; 4],
@@ -34,15 +34,15 @@ pub(super) struct Uniform {
     vehicle_parts: [VehicleBox; 4],
 }
 
-pub(super) fn shader_source() -> String {
+pub(crate) fn shader_source() -> String {
     [
-        include_str!("puddle_common.wgsl"),
-        include_str!("puddle_reflection.wgsl"),
+        include_str!("../shaders/puddles/puddle_common.wgsl"),
+        include_str!("../shaders/puddles/puddle_reflection.wgsl"),
     ]
     .join("\n")
 }
 
-pub(super) struct Pipelines {
+pub(crate) struct Pipelines {
     layout: wgpu::BindGroupLayout,
     params: wgpu::Buffer,
     trace: wgpu::RenderPipeline,
@@ -57,7 +57,7 @@ pub(super) struct Pipelines {
 }
 
 impl Pipelines {
-    pub(super) fn new(
+    pub(crate) fn new(
         device: &wgpu::Device,
         scene_shader: &wgpu::ShaderModule,
         camera_layout: &wgpu::BindGroupLayout,
@@ -84,7 +84,7 @@ impl Pipelines {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
                         min_binding_size: wgpu::BufferSize::new(
-                            std::mem::size_of::<Uniform>() as u64
+                            size_of::<Uniform>() as u64
                         ),
                     },
                     count: None,
@@ -114,7 +114,7 @@ impl Pipelines {
         });
         let params = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("puddle reflection params"),
-            size: std::mem::size_of::<Uniform>() as u64,
+            size: size_of::<Uniform>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -170,7 +170,7 @@ impl Pipelines {
                     module: scene_shader,
                     entry_point: Some("vs_main"),
                     buffers: &[Some(wgpu::VertexBufferLayout {
-                        array_stride: std::mem::size_of::<Vertex>() as u64,
+                        array_stride: size_of::<Vertex>() as u64,
                         step_mode: wgpu::VertexStepMode::Vertex,
                         attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2],
                     })],
@@ -204,7 +204,7 @@ impl Pipelines {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
                     min_binding_size: wgpu::BufferSize::new(
-                        std::mem::size_of::<VehicleUniform>() as u64
+                        size_of::<VehicleUniform>() as u64
                     ),
                 },
                 count: None,
@@ -212,7 +212,7 @@ impl Pipelines {
         });
         let vehicle_params = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("puddle vehicle plane"),
-            size: std::mem::size_of::<VehicleUniform>() as u64,
+            size: size_of::<VehicleUniform>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -247,7 +247,7 @@ impl Pipelines {
                             module: scene_shader,
                             entry_point: Some("vs_puddle_vehicle"),
                             buffers: &[Some(wgpu::VertexBufferLayout {
-                                array_stride: std::mem::size_of::<Vertex>() as u64,
+                                array_stride: size_of::<Vertex>() as u64,
                                 step_mode: wgpu::VertexStepMode::Vertex,
                                 attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2],
                             })],
@@ -328,7 +328,7 @@ impl Pipelines {
     }
 }
 
-pub(super) struct Targets {
+pub(crate) struct Targets {
     size: (u32, u32),
     source_depth: wgpu::Texture,
     hit_depth: wgpu::Texture,
@@ -343,8 +343,8 @@ pub(super) struct Targets {
     blur_x_bg: wgpu::BindGroup,
     blur_y_bg: wgpu::BindGroup,
     resolve_bg: wgpu::BindGroup,
-    pub(super) down_bg: wgpu::BindGroup,
-    pub(super) tonemap_bg: [wgpu::BindGroup; 2],
+    pub(crate) down_bg: wgpu::BindGroup,
+    pub(crate) tonemap_bg: [wgpu::BindGroup; 2],
 }
 
 fn trace_size(w: u32, h: u32) -> (u32, u32) {
@@ -497,7 +497,7 @@ impl Targets {
 }
 
 impl Renderer {
-    pub(super) fn prepare_puddle_reflections(
+    pub(crate) fn prepare_puddle_reflections(
         &mut self,
         w: u32,
         h: u32,
@@ -611,7 +611,7 @@ impl Renderer {
         true
     }
 
-    pub(super) fn encode_puddle_reflections(
+    pub(crate) fn encode_puddle_reflections(
         &self,
         encoder: &mut wgpu::CommandEncoder,
         w: u32,
@@ -757,7 +757,7 @@ impl Renderer {
     }
 }
 
-fn reflection_plane(point: DVec3, normal: Vec3, origin: DVec3) -> glam::Vec4 {
+fn reflection_plane(point: DVec3, normal: Vec3, origin: DVec3) -> Vec4 {
     normal.extend(normal.dot((point - origin).as_vec3()))
 }
 

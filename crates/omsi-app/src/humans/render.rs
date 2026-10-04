@@ -1,5 +1,7 @@
 use super::*;
 
+const SUN_SHADOW_RANGE: f64 = 45.0;
+
 pub(super) fn walk_input(speed: f32, dt: f32, natural: bool, seed: u32) -> AnimInput {
     AnimInput {
         kind: (speed > 0.05) as u8,
@@ -127,6 +129,7 @@ impl Humans {
                 Mat4::IDENTITY,
                 self.gpu.materials[&key].clone(),
             );
+            renderer.set_omsi_caster(scene, inst, true);
             if level > 0 {
                 renderer.set_params(scene, inst, &[], false, &[]);
             }
@@ -336,9 +339,11 @@ impl Humans {
             let xf = tilt * Mat4::from_rotation_z((-p.heading).to_radians() as f32);
             let lit_to = if inside { p.interior } else { 0.0 };
             p.lit += (lit_to - p.lit) * (sdt / 0.4).min(1.0);
+            let casts = (p.position - from).length() < SUN_SHADOW_RANGE;
             for (_, inst) in &p.meshes {
                 renderer.set_transform(scene, *inst, p.position, xf);
                 renderer.set_interior(scene, *inst, p.lit * 0.5);
+                renderer.set_casts_shadow(scene, *inst, casts);
             }
             let seated = p.anim.angles[0].abs() >= 45.0;
             let blob = hidden != Some(true) && !seated && (p.position - from).length() < 90.0;

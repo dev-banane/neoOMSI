@@ -242,6 +242,8 @@ pub struct Humans {
     stroll_timer: f32,
     pub exact_fare: bool,
     pub boarding: String,
+    /// Free seats before standing places; off, OMSI's random choice among all places.
+    pub prefer_seats: bool,
     pub give_ticket: bool,
     pub ticket_key: String,
     pub eye: Option<Eye>,
@@ -320,6 +322,7 @@ impl Humans {
             stroll_timer: 0.0,
             exact_fare: true,
             boarding: "auto".into(),
+            prefer_seats: false,
             give_ticket: false,
             ticket_key: "T".into(),
             eye: None,

@@ -2,27 +2,27 @@ use super::{GpuTexture, MaterialId, Renderer, Scene, TextureId, buffer_init};
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-pub(super) struct MaterialUniform {
-    pub(super) color: [f32; 4],
-    pub(super) params: [f32; 4],
-    pub(super) extra: [f32; 4],
-    pub(super) params2: [f32; 4],
+pub(crate) struct MaterialUniform {
+    pub(crate) color: [f32; 4],
+    pub(crate) params: [f32; 4],
+    pub(crate) extra: [f32; 4],
+    pub(crate) params2: [f32; 4],
     /// rgb: emissive colour; w: an explicitly identified transparent glass layer
-    pub(super) emissive: [f32; 4],
-    pub(super) specular: [f32; 4],
+    pub(crate) emissive: [f32; 4],
+    pub(crate) specular: [f32; 4],
     /// x: `[matl_bumpmap]` factor, y: has a bump map, z/w: noZwrite/noZcheck
-    pub(super) bump: [f32; 4],
+    pub(crate) bump: [f32; 4],
     /// The PBR maps beside the diffuse texture (`Scene::pbr_maps`): x has a normal map,
     /// y an occlusion, z a roughness, w a metalness channel.
-    pub(super) pbr: [f32; 4],
+    pub(crate) pbr: [f32; 4],
     /// x: a screen (`MaterialExtra::screen`); y: 1 `[matl_texadress_border]`, 2
     /// `[matl_texadress_mirroronce]`; z the border colour's rgb packed as r * 65536 + g * 256 + b (bytes), w its alpha.
-    pub(super) flags: [f32; 4],
+    pub(crate) flags: [f32; 4],
     /// rgb: the D3D material's ambient colour, which takes the ambient light (C); w: 1 for
     /// a texture that is a season's snow picture (no snow laid over it), 2 the map's water
-    pub(super) ambient: [f32; 4],
+    pub(crate) ambient: [f32; 4],
     /// Window mask: mesh X/Z origin and inverse size; zero disables it.
-    pub(super) wipe_bounds: [f32; 4],
+    pub(crate) wipe_bounds: [f32; 4],
 }
 
 /// The maps of a PBR set found beside a diffuse texture (`foo_n.png` and the rest, see
@@ -60,9 +60,8 @@ pub enum TexAddressing {
     MirrorOnce,
 }
 
-/// Cache key for a material bind group, including texture generations and uniform values.
 #[derive(Clone, PartialEq, Eq, Hash)]
-pub(super) struct BindKey {
+pub(crate) struct BindKey {
     textures: [(usize, u64); 7],
     address: TexAddressing,
     uniform: [u32; 44],
@@ -95,16 +94,15 @@ pub struct Material {
     /// `[matl_transmap]` (texture, its alpha channel is used).
     pub transmap: Option<(TextureId, bool)>,
     /// Its textures' addressing (`[matl_texadress_*]`).
-    pub(super) address: TexAddressing,
+    pub(crate) address: TexAddressing,
     /// Keep the exact material parameters so a CTC texture swap can change only the diffuse
     /// map without losing map lighting, moisture, screen, or other renderer flags.
-    pub(super) uniform: MaterialUniform,
-    pub(super) buf: wgpu::Buffer,
-    pub(super) bind_group: wgpu::BindGroup,
+    pub(crate) uniform: MaterialUniform,
+    pub(crate) buf: wgpu::Buffer,
+    pub(crate) bind_group: wgpu::BindGroup,
 }
 
 impl Material {
-    /// Whether `id` is used by any of this material's texture inputs.
     pub fn uses_texture(&self, id: TextureId) -> bool {
         self.texture == Some(id)
             || self.nightmap == Some(id)
@@ -114,19 +112,19 @@ impl Material {
             || self.env_mask == Some(id)
             || self.bump.map(|b| b.0) == Some(id)
     }
+
+    /// `[matl_transmap]` was given, its file there or not (the shader's
+    /// `has_transmap_declared`).
+    pub fn transmap_declared(&self) -> bool {
+        (self.uniform.params2[3] + 0.5) as u32 & 2 != 0
+    }
 }
 
-/// The material manager's settings beyond the maps of `add_material_all`: depth handling,
-/// the reflection mask and the o3d material's specular term.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct MaterialExtra {
-    /// `[matl_envmap_mask]`
     pub env_mask: Option<TextureId>,
-    /// `[matl_noZwrite]`
     pub no_z_write: bool,
-    /// `[matl_noZcheck]`
     pub no_z_check: bool,
-    /// `[matl_Zbias]`
     pub z_bias: i32,
     /// The D3D material's ambient colour, its share of the ambient light (C); None: the
     /// diffuse colour's.
@@ -193,19 +191,17 @@ pub struct MaterialExtra {
 }
 
 #[derive(Clone, Copy)]
-pub(super) struct MaterialMaps {
-    pub(super) texture: Option<TextureId>,
-    pub(super) transmap: Option<(TextureId, bool)>,
-    pub(super) nightmap: Option<TextureId>,
-    pub(super) lightmap: Option<TextureId>,
-    pub(super) envmap: Option<(TextureId, f32)>,
-    pub(super) env_mask: Option<TextureId>,
-    pub(super) bump: Option<(TextureId, f32)>,
-    pub(super) pbr: Option<PbrMaps>,
+pub(crate) struct MaterialMaps {
+    pub(crate) texture: Option<TextureId>,
+    pub(crate) transmap: Option<(TextureId, bool)>,
+    pub(crate) nightmap: Option<TextureId>,
+    pub(crate) lightmap: Option<TextureId>,
+    pub(crate) envmap: Option<(TextureId, f32)>,
+    pub(crate) env_mask: Option<TextureId>,
+    pub(crate) bump: Option<(TextureId, f32)>,
+    pub(crate) pbr: Option<PbrMaps>,
 }
 
-/// `MaterialUniform::ambient`'s w: 1 for a material whose texture is a season's snow
-/// picture (`Scene::snow_textures`).
 fn snow_texture_flag(scene: &Scene, texture: Option<TextureId>) -> f32 {
     if texture.is_some_and(|t| scene.snow_textures.contains(&t)) {
         1.0
@@ -215,8 +211,6 @@ fn snow_texture_flag(scene: &Scene, texture: Option<TextureId>) -> f32 {
 }
 
 impl Renderer {
-    /// The PBR set found beside diffuse texture `diffuse` (`omsi_texture::pbr`): its maps up
-    /// (as data, not colours) and known to the materials made with that texture from now on.
     pub fn add_pbr_maps(
         &self,
         scene: &mut Scene,
@@ -257,7 +251,6 @@ impl Renderer {
         );
     }
 
-    /// `[matl_noZwrite]` for a material that is already in the scene.
     pub fn set_no_z_write(&self, scene: &mut Scene, id: MaterialId, on: bool) {
         if let Some(m) = scene.materials.get_mut(id) {
             m.no_z_write = on;
@@ -275,7 +268,6 @@ impl Renderer {
         self.add_material_ex(scene, texture, alpha, color, unlit, None)
     }
 
-    /// Material with an optional transparency map `(texture, use_alpha_channel)`.
     pub fn add_material_ex(
         &self,
         scene: &mut Scene,
@@ -290,7 +282,6 @@ impl Renderer {
         )
     }
 
-    /// Material with transparency map and `[matl_nightmap]` self-illumination texture.
     pub fn add_material_night(
         &self,
         scene: &mut Scene,
@@ -306,8 +297,6 @@ impl Renderer {
         )
     }
 
-    /// Material with a `[matl_lightmap]` texture whose strength comes from the per-slot
-    /// instance value (illuminated displays).
     pub fn add_material_lit(
         &self,
         scene: &mut Scene,
@@ -324,8 +313,6 @@ impl Renderer {
         )
     }
 
-    /// Full vehicle material: also a `[matl_envmap]` sphere map with its strength factor
-    /// (masked by the diffuse alpha channel like the original).
     pub fn add_material_env(
         &self,
         scene: &mut Scene,
@@ -344,7 +331,6 @@ impl Renderer {
         )
     }
 
-    /// Like `add_material_env` with an emissive colour (`[matl_allcolor]`).
     pub fn add_material_all(
         &self,
         scene: &mut Scene,
@@ -364,8 +350,6 @@ impl Renderer {
         )
     }
 
-    /// Like `add_material_all` with the rest of the material manager's settings
-    /// (reflection mask, depth handling, specular term).
     #[allow(clippy::too_many_arguments)]
     pub fn add_material_extra(
         &self,
@@ -398,7 +382,6 @@ impl Renderer {
         )
     }
 
-    /// Swap the material of one slot of an instance (material variants).
     pub fn set_material(
         &self,
         scene: &mut Scene,
@@ -493,54 +476,21 @@ impl Renderer {
         if uniform.ambient[3] < 1.5 {
             uniform.ambient[3] = snow_texture_flag(scene, texture);
         }
-        let slot = |t: Option<TextureId>| {
-            t.and_then(|t| scene.textures.get(t).map(|g| (t, g.generation)))
-                .unwrap_or((usize::MAX, 0))
-        };
-        let key = BindKey {
-            textures: [
-                slot(texture),
-                slot(transmap.map(|t| t.0)),
-                slot(nightmap),
-                slot(lightmap),
-                slot(envmap.map(|e| e.0)),
-                slot(env_mask),
-                slot(bump.map(|b| b.0)),
-            ],
+        let (bind_group, buf) = self.cached_bind_group(
+            scene,
+            MaterialMaps {
+                texture,
+                transmap,
+                nightmap,
+                lightmap,
+                envmap,
+                env_mask,
+                bump,
+                pbr: texture.and_then(|id| scene.pbr_maps.get(&id)).copied(),
+            },
             address,
-            uniform: bytemuck::cast(uniform),
-        };
-        let (bind_group, buf) = match scene.bind_groups.get(&key) {
-            Some((bg, b)) => (bg.clone(), b.clone()),
-            None => {
-                let buf = buffer_init(
-                    &self.device,
-                    &self.queue,
-                    None,
-                    bytemuck::bytes_of(&uniform),
-                    wgpu::BufferUsages::UNIFORM,
-                );
-                let bind_group = self.material_bind_group(
-                    &scene.textures,
-                    MaterialMaps {
-                        texture,
-                        transmap,
-                        nightmap,
-                        lightmap,
-                        envmap,
-                        env_mask,
-                        bump,
-                        pbr: texture.and_then(|id| scene.pbr_maps.get(&id)).copied(),
-                    },
-                    address,
-                    &buf,
-                );
-                scene
-                    .bind_groups
-                    .insert(key, (bind_group.clone(), buf.clone()));
-                (bind_group, buf)
-            }
-        };
+            uniform,
+        );
         scene.materials.push(Material {
             texture,
             alpha,
@@ -695,7 +645,7 @@ impl Renderer {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn add_material_inner(
+    pub(crate) fn add_material_inner(
         &self,
         scene: &mut Scene,
         texture: Option<TextureId>,
@@ -711,9 +661,7 @@ impl Renderer {
         moisture: f32,
         extra: MaterialExtra,
     ) -> MaterialId {
-        // With reflections disabled, treat the material as having no environment map.
         let envmap = envmap.filter(|_| self.options.reflections);
-        // The mask and bump map affect only the reflection.
         let env_mask = extra.env_mask.filter(|_| envmap.is_some());
         let bump = extra.bump.filter(|_| envmap.is_some());
         // a rain film's reflection slot holds the picture behind the glass: its drops show
@@ -731,15 +679,15 @@ impl Renderer {
             AlphaMode::Blend => 2.0,
         };
         // a mirror's glass shows a picture this renderer drew (`add_render_texture`): the
-        // enhanced shader must not brighten it as it does a display (see enhanced.wgsl)
+        // enhanced shader must not brighten it as it does a display (see shaders/enhanced/scene_lighting.wgsl)
         let mirror = unlit
             && texture
-                .and_then(|t| scene.textures.get(t))
-                .is_some_and(|t| {
-                    t.texture
-                        .usage()
-                        .contains(wgpu::TextureUsages::RENDER_ATTACHMENT)
-                });
+            .and_then(|t| scene.textures.get(t))
+            .is_some_and(|t| {
+                t.texture
+                    .usage()
+                    .contains(wgpu::TextureUsages::RENDER_ATTACHMENT)
+            });
         let uniform = MaterialUniform {
             wipe_bounds: [0.0; 4],
             color,
@@ -785,10 +733,10 @@ impl Renderer {
                 // part that may be metal (see the shaders)
                 (if env_mask.is_some() { 1.0 } else { 0.0 })
                     + if extra.transmap_declared || transmap.is_some() {
-                        2.0
-                    } else {
-                        0.0
-                    }
+                    2.0
+                } else {
+                    0.0
+                }
                     + if extra.metal_ok { 4.0 } else { 0.0 },
             ],
             emissive: [
@@ -850,54 +798,21 @@ impl Renderer {
                 ]
             },
         };
-        let slot = |t: Option<TextureId>| {
-            t.and_then(|t| scene.textures.get(t).map(|g| (t, g.generation)))
-                .unwrap_or((usize::MAX, 0))
-        };
-        let key = BindKey {
-            textures: [
-                slot(texture),
-                slot(transmap.map(|t| t.0)),
-                slot(nightmap),
-                slot(lightmap),
-                slot(envmap.map(|e| e.0)),
-                slot(env_mask),
-                slot(bump.map(|b| b.0)),
-            ],
+        let (bind_group, buf) = self.cached_bind_group(
+            scene,
+            MaterialMaps {
+                texture,
+                transmap,
+                nightmap,
+                lightmap,
+                envmap,
+                env_mask,
+                bump,
+                pbr: texture.and_then(|t| scene.pbr_maps.get(&t)).copied(),
+            },
             address,
-            uniform: bytemuck::cast(uniform),
-        };
-        let (bind_group, buf) = match scene.bind_groups.get(&key) {
-            Some((bg, b)) => (bg.clone(), b.clone()),
-            None => {
-                let buf = buffer_init(
-                    &self.device,
-                    &self.queue,
-                    None,
-                    bytemuck::bytes_of(&uniform),
-                    wgpu::BufferUsages::UNIFORM,
-                );
-                let bind_group = self.material_bind_group(
-                    &scene.textures,
-                    MaterialMaps {
-                        texture,
-                        transmap,
-                        nightmap,
-                        lightmap,
-                        envmap,
-                        env_mask,
-                        bump,
-                        pbr: texture.and_then(|t| scene.pbr_maps.get(&t)).copied(),
-                    },
-                    address,
-                    &buf,
-                );
-                scene
-                    .bind_groups
-                    .insert(key, (bind_group.clone(), buf.clone()));
-                (bind_group, buf)
-            }
-        };
+            uniform,
+        );
         scene.materials.push(Material {
             texture,
             alpha,
@@ -921,7 +836,47 @@ impl Renderer {
         scene.materials.len() - 1
     }
 
-    /// The scene's slot for the picture behind the glass (black until a frame is drawn).
+    fn cached_bind_group(
+        &self,
+        scene: &mut Scene,
+        maps: MaterialMaps,
+        address: TexAddressing,
+        uniform: MaterialUniform,
+    ) -> (wgpu::BindGroup, wgpu::Buffer) {
+        let slot = |t: Option<TextureId>| {
+            t.and_then(|t| scene.textures.get(t).map(|g| (t, g.generation)))
+                .unwrap_or((usize::MAX, 0))
+        };
+        let key = BindKey {
+            textures: [
+                slot(maps.texture),
+                slot(maps.transmap.map(|t| t.0)),
+                slot(maps.nightmap),
+                slot(maps.lightmap),
+                slot(maps.envmap.map(|e| e.0)),
+                slot(maps.env_mask),
+                slot(maps.bump.map(|b| b.0)),
+            ],
+            address,
+            uniform: bytemuck::cast(uniform),
+        };
+        if let Some((bg, b)) = scene.bind_groups.get(&key) {
+            return (bg.clone(), b.clone());
+        }
+        let buf = buffer_init(
+            &self.device,
+            &self.queue,
+            None,
+            bytemuck::bytes_of(&uniform),
+            wgpu::BufferUsages::UNIFORM,
+        );
+        let bind_group = self.material_bind_group(&scene.textures, maps, address, &buf);
+        scene
+            .bind_groups
+            .insert(key, (bind_group.clone(), buf.clone()));
+        (bind_group, buf)
+    }
+
     fn glass_slot(&self, scene: &mut Scene) -> TextureId {
         if let Some(id) = scene.glass_slot {
             return id;
@@ -936,9 +891,7 @@ impl Renderer {
         id
     }
 
-    /// The bind group of a material: its textures (or the plain white/black ones), its
-    /// sampler and its uniform buffer.
-    pub(super) fn material_bind_group(
+    pub(crate) fn material_bind_group(
         &self,
         textures: &[GpuTexture],
         maps: MaterialMaps,
@@ -955,10 +908,8 @@ impl Renderer {
         let light_view = view(maps.lightmap, &self.black_texture);
         let diffuse_view = view(maps.texture, &self.white_texture);
         let trans_view = view(maps.transmap.map(|t| t.0), &self.white_texture);
-        // Missing masks use white (full mask); missing bump maps use white (flat).
         let mask_view = view(maps.env_mask, &self.white_texture);
         let bump_view = view(maps.bump.map(|b| b.0), &self.white_texture);
-        // Without PBR maps, use a flat normal and white ORM values; shader flags select the channels.
         let normal_view = view(maps.pbr.and_then(|p| p.normal), &self.flat_normal_texture);
         let orm_view = view(maps.pbr.and_then(|p| p.orm), &self.white_texture);
         let sampler = match address {
@@ -1028,9 +979,13 @@ impl Renderer {
     /// Envir_Brightness` on their transmapped body and roof (`[matl_alpha] 1`), which is 0
     /// at night, and scaled by it the whole roof went at dusk - with alpha to coverage
     /// under MSAA the colour pass drew none of its samples - while in OMSI it stays.
-    pub fn clamp_slot_alpha(alpha: f32, material_alpha: AlphaMode) -> f32 {
+    /// Except a blended slot with a declared `[matl_transmap]`: OMSI 2 takes its alpha from
+    /// the transmap alone, so the ICU400 sign controller's screen (`\S:1` under a
+    /// `signController_alphaScale` no script sets) still shows its text.
+    pub fn clamp_slot_alpha(alpha: f32, material_alpha: AlphaMode, transmap_declared: bool) -> f32 {
         match material_alpha {
             AlphaMode::Opaque | AlphaMode::Test => 1.0,
+            AlphaMode::Blend if transmap_declared => 1.0,
             AlphaMode::Blend => alpha,
         }
     }

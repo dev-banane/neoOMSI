@@ -11,9 +11,7 @@
 //! Both repeat seamlessly (every lattice is taken modulo its frequency), and both come with
 //! a mip chain (a box filter) so that far clouds do not shimmer.
 
-/// Edge of the shape map in texels.
 pub const SHAPE_SIZE: u32 = 256;
-/// Edge of the detail volume in texels.
 pub const DETAIL_SIZE: u32 = 64;
 
 fn fract(x: f32) -> f32 {
@@ -32,7 +30,6 @@ fn hash13(p: [f32; 3], k: f32) -> f32 {
     fract((p3[0] + p3[1]) * p3[2])
 }
 
-/// Value noise on a lattice that repeats every `tile` cells.
 fn value_noise(x: [f32; 3], tile: f32) -> f32 {
     let p = [x[0].floor(), x[1].floor(), x[2].floor()];
     let f = [fract(x[0]), fract(x[1]), fract(x[2])];
@@ -55,8 +52,6 @@ fn value_noise(x: [f32; 3], tile: f32) -> f32 {
     lerp(lerp(x00, x10, u[1]), lerp(x01, x11, u[1]), u[2])
 }
 
-/// Worley (cellular) noise, 1 at a cell's point falling off with the squared distance,
-/// on cells that repeat every `tile`.
 fn worley(x: [f32; 3], tile: f32) -> f32 {
     let p = [x[0].floor(), x[1].floor(), x[2].floor()];
     let f = [fract(x[0]), fract(x[1]), fract(x[2])];
@@ -70,7 +65,6 @@ fn worley(x: [f32; 3], tile: f32) -> f32 {
                     modf(p[1] + b[1], tile),
                     modf(p[2] + b[2], tile),
                 ];
-                // the cell's point, one hash per axis
                 let o = [
                     hash13(c, 1031.1031),
                     hash13([c[1] + 7.3, c[2], c[0]], 1031.1031),
@@ -120,7 +114,6 @@ fn to_u8(v: f32) -> u8 {
     (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
 }
 
-/// Rows of `n` computed on as many threads as the machine has.
 fn parallel_rows<T: Send + Clone + Default>(
     n: usize,
     row_len: usize,
@@ -145,7 +138,6 @@ fn parallel_rows<T: Send + Clone + Default>(
     out
 }
 
-/// The shape map's mip chain, RGBA8, level 0 first.
 pub fn shape_map() -> Vec<Vec<u8>> {
     let n = SHAPE_SIZE as usize;
     let base = parallel_rows::<u8>(n, n * 4, |y, row| {
@@ -177,7 +169,6 @@ pub fn shape_map() -> Vec<Vec<u8>> {
     levels
 }
 
-/// The detail volume's mip chain, R8, level 0 first (z slices of y rows of x).
 pub fn detail_volume() -> Vec<Vec<u8>> {
     let n = DETAIL_SIZE as usize;
     let base = parallel_rows::<u8>(n * n, n, |zy, row| {

@@ -7,44 +7,30 @@ import { docPath, url } from '../lib/routes';
 import { Answers } from './Faq';
 
 const ROWS: [string, ReactNode, ReactNode][] = [
+	['Needs OMSI 2', 'Yes, uses your own copy', 'Yes, uses your own copy'],
+	['Runs on', 'Windows, Mac, Linux, Android', 'Windows, Mac, Linux, Android'],
+	['Multiplayer server', 'Yes, Windows and Linux', 'Yes'],
 	[
-		'Origin',
-		'Fork of openOMSI, developed independently',
-		'The original project'
-	],
-	['License', 'GPL-3.0-or-later (inherited openOMSI code stays MIT)', 'MIT'],
-	['Written in', 'Rust', 'Rust'],
-	[
-		'Graphics',
-		'wgpu: DirectX 12, Metal, Vulkan',
-		'wgpu: DirectX 12, Metal, Vulkan'
-	],
-	[
-		'Needs OMSI 2',
-		'Yes, plays your installed copy',
-		'Yes, plays your installed copy'
-	],
-	[
-		'Platforms',
-		'Windows, macOS, Linux, Android',
-		'Windows, macOS, Linux, Android'
-	],
-	['Dedicated server', 'Yes, Windows and Linux', 'Yes'],
-	[
-		'Compatibility target',
-		'OMSI 2.2.032, verified subsystem by subsystem',
+		'Goal',
+		'Play exactly like OMSI 2',
 		'Full compatibility with existing OMSI 2 content'
 	],
+	['Free and open source', 'Yes', 'Yes'],
 	['Status', 'Early release', 'Early release']
 ];
 
 const FOCUS: [string, string, ReactNode][] = [
 	[
 		'check_circle',
-		'Verified behavior',
+		'More stable',
+		'Two team members check every change before it goes in, and automatic tests make sure fixed bugs stay fixed.'
+	],
+	[
+		'sync_alt',
+		'Plays like the original',
 		<>
-			Every subsystem is compared with OMSI&nbsp;2.2.032 and only counts
-			as done once it matches and is covered by regression tests. See{' '}
+			Each part of the game is checked against OMSI&nbsp;2 until it
+			behaves the same. See{' '}
 			<a className="link" href={url(docPath('COMPATIBILITY'))}>
 				Compatibility
 			</a>
@@ -53,29 +39,18 @@ const FOCUS: [string, string, ReactNode][] = [
 	],
 	[
 		'public',
-		'Clean-room code',
-		'No proprietary source code, decompiled binaries or copyrighted assets. neoOMSI only reads the files of your own OMSI 2.'
-	],
-	[
-		'flag',
-		'Documented triage',
-		<>
-			Bugs are classified and verified against the original game before
-			they are fixed. See{' '}
-			<a className="link" href={url(docPath('ISSUE_TRIAGE'))}>
-				Issue triage
-			</a>
-			.
-		</>
+		'Nothing copied from OMSI 2',
+		'It only reads the files of the copy you own.'
 	],
 	[
 		'autorenew',
-		'A build for every change',
+		'Tested releases',
 		<>
-			Every change to the main branch is built for all platforms and
-			published. See{' '}
-			<a className="link" href={url(docPath('RELEASING'))}>
-				Releasing &amp; versioning
+			Changes are bundled into proper releases that are tested before
+			they come out. Want the newest fixes sooner? Try the nightly
+			build. See{' '}
+			<a className="link" href={url('/releases/')}>
+				Releases
 			</a>
 			.
 		</>
@@ -107,10 +82,9 @@ export function OpenOmsi() {
 				</p>
 				<h1 className="display">neoOMSI vs openOMSI</h1>
 				<p className="mt-6 max-w-[36em] text-[19px] text-muted">
-					neoOMSI started as a fork of openOMSI, the Rust recreation
-					of OMSI&nbsp;2. Both play the maps, buses and mods of your
-					OMSI&nbsp;2 installation. This page shows how they differ
-					and how to switch.
+					neoOMSI and openOMSI are two different projects. Both let
+					you play OMSI&nbsp;2 with your own maps, buses and mods.
+					Here is how they differ, and how to switch.
 				</p>
 				<div className="mt-8 flex flex-wrap gap-3">
 					<a className="btn gap-2" href={url('/download/')}>
@@ -182,12 +156,16 @@ export function OpenOmsi() {
 				</section>
 
 				<section className="grid gap-x-16 gap-y-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,2fr)]">
-					<h2 className="section-title">Where neoOMSI comes from</h2>
+					<h2 className="section-title">How the projects relate</h2>
 					<div className="max-w-[40em] space-y-4">
 						<p>
-							neoOMSI was originally forked from openOMSI by
-							usonskyyyy. The code it inherited stays under the
-							MIT license and is credited in the{' '}
+							neoOMSI has its own team, its own releases and its
+							own place to report bugs. It is not connected to
+							openOMSI.
+						</p>
+						<p>
+							Some of neoOMSI's early code came from openOMSI by
+							usonskyyyy, and it is credited in the{' '}
 							<a
 								className="link"
 								href={`https://github.com/${REPO}/blob/main/NOTICE`}
@@ -195,14 +173,6 @@ export function OpenOmsi() {
 								NOTICE
 							</a>{' '}
 							file.
-						</p>
-						<p>
-							Since then neoOMSI has been its own project, with
-							its own releases, issue tracker and documentation.
-							Everything it adds is licensed under
-							GPL-3.0-or-later, which requires anyone who
-							distributes a modified version to publish its source
-							code too.
 						</p>
 					</div>
 				</section>
@@ -213,7 +183,7 @@ export function OpenOmsi() {
 						{FOCUS.map(([symbol, title, text]) => (
 							<div
 								key={title}
-								className="flex flex-col gap-3 rounded-xl bg-[color-mix(in_srgb,var(--page)_50%,var(--raised))] p-5"
+								className="card flex flex-col gap-3 p-5"
 							>
 								<span className="text-accent">
 									<Icon name={symbol} size={28} />

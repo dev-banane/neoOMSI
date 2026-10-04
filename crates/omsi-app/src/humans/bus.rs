@@ -282,6 +282,11 @@ impl BusNow {
 }
 
 impl Humans {
+    pub(crate) fn any_door_open(v: &VehicleInstance) -> bool {
+        let (entry, exit) = doors_open(v, 8, 8);
+        entry.into_iter().chain(exit).any(|open| open)
+    }
+
     pub(super) fn cabin_for(&mut self, v: &VehicleInstance) -> Option<Arc<Cabin>> {
         let parts = train_parts(v);
         let key: Vec<PathBuf> = parts.iter().map(|p| p.0.path.clone()).collect();

@@ -14,7 +14,6 @@ struct VsOut {
 
 @vertex
 fn vs_main(@builtin(vertex_index) i: u32) -> VsOut {
-    // one triangle over the whole screen
     let x = f32(i32(i & 1u) * 4 - 1);
     let y = f32(i32(i >> 1u) * 4 - 1);
     var out: VsOut;

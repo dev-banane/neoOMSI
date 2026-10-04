@@ -14,7 +14,10 @@ ab_glyph = "0.2"
 resvg = { version = "0.48", default-features = false }
 hashbrown.workspace = true
 pollster.workspace = true
+omsi-render = { path = "../omsi-render" }
+omsi-texture = { path = "../omsi-texture" }
+rustrict = "0.7"
+image.workspace = true
 
 [dev-dependencies]
 naga = { version = "30", features = ["wgsl-in"] }
-image.workspace = true

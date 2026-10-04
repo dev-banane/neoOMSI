@@ -26,6 +26,7 @@ impl App {
             .get_or_insert_with(|| crate::controllers::Controllers::new(&self.args.root, hwnd));
         ctl.set_focus(self.window_focused);
         ctl.deadzone = self.settings.ctrl_deadzone;
+        ctl.centre = self.settings.steer_center;
         ctl.pedal_throttle = self.settings.pedal_throttle;
         ctl.pedal_brake = self.settings.pedal_brake;
         ctl.ff_invert = self.settings.ff_invert;
@@ -43,6 +44,9 @@ impl App {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect();
+        }
+        if ctl.sources.iter().all(Option::is_none) && !self.settings.ctrl_assign.is_empty() {
+            ctl.sources = crate::controllers::parse_assign(&self.settings.ctrl_assign);
         }
         let analog = ctl.poll();
         let actions = std::mem::take(&mut ctl.actions);
@@ -118,12 +122,14 @@ impl App {
         }
         if analog.stick {
             if let (Some(x), Some(p)) = (analog.steering, self.player.as_ref()) {
+                let sens = self.settings.stick_sens;
                 let target = crate::controllers::gamepad_steering(
                     x,
                     p.vehicle.physics.velocity_kmh() as f32,
+                    sens,
                 );
                 let now = p.vehicle.physics.controls.steering;
-                let step = dt / 1.2;
+                let step = dt / crate::controllers::gamepad_steering_time(sens);
                 analog.steering = Some(now + (target - now).clamp(-step, step));
             }
         }
@@ -235,8 +241,8 @@ impl App {
                     "view_look_up",
                     "view_look_down",
                 ]
-                .iter()
-                .position(|x| *x == n)
+                    .iter()
+                    .position(|x| *x == n)
                 {
                     self.pad_look[k] = *down;
                     return false;
@@ -372,8 +378,8 @@ impl App {
                     if self.settings.head_tracking
                         && self.headtrack.is_none()
                         && self
-                            .headtrack_failed
-                            .is_none_or(|t| t.elapsed().as_secs_f32() > 5.0)
+                        .headtrack_failed
+                        .is_none_or(|t| t.elapsed().as_secs_f32() > 5.0)
                     {
                         self.headtrack =
                             crate::headtrack::HeadTracker::start(self.settings.head_tracking_port);
@@ -443,6 +449,7 @@ impl App {
                         let inside_view = self.view == "driver";
                         let entering = std::mem::take(&mut self.cam_blend.entering);
                         let resetting = std::mem::take(&mut self.cam_blend.resetting);
+                        let reset_zoom = std::mem::take(&mut self.cam_blend.reset_zoom);
                         let left = self
                             .cam_blend
                             .key
@@ -472,7 +479,13 @@ impl App {
                                     }
                                     Some(f)
                                 } else {
-                                    self.cam_blend.shown.clone()
+                                    let mut from = self.cam_blend.shown.clone();
+                                    if resetting {
+                                        if let (Some(from), Some(zoom)) = (&mut from, reset_zoom) {
+                                            from.fov *= zoom;
+                                        }
+                                    }
+                                    from
                                 };
                                 if let Some(from) = from {
                                     let d = glam::Vec3::from_array(from.pos)
@@ -614,6 +627,32 @@ impl App {
                 q.sync_transforms(r, scene, false);
             }
         }
+
+        if self.player.is_none() {
+            if let Some(a) = self.audio.as_ref() {
+                a.follow_device();
+            }
+            if let (Some(a), Some(cam)) = (self.audio.as_ref(), self.camera.as_ref()) {
+                let (reverb_time, reverb_mix) = self
+                    .world
+                    .as_ref()
+                    .map(|w| w.reverb_at(cam.position))
+                    .unwrap_or((0.0, 0.0));
+                a.set_listener(omsi_audio::Listener {
+                    position: cam.position.as_vec3(),
+                    forward: cam.forward(),
+                    right: cam.right(),
+                    master: if self.paused {
+                        0.0
+                    } else {
+                        self.settings.volume.clamp(0.0, 1.0)
+                    },
+                    reverb_time,
+                    reverb_mix,
+                });
+            }
+        }
+        self.update_placed_sounds();
         if let Some(a) = self.audio.as_ref() {
             match self.player.as_ref() {
                 Some(p) => {

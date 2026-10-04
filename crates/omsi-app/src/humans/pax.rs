@@ -263,7 +263,7 @@ impl Humans {
         let trailers = part_frames(bus, &cabin);
         let rot = bus.body_rotation();
         for _ in 0..n {
-            let Some(k) = self.reserve_place(BusId::Player, cabin.seats.len()) else {
+            let Some(k) = self.reserve_place(BusId::Player, &cabin.seats) else {
                 break;
             };
             let mut pax = Pax::new(self.walk_pace() as f32);
@@ -306,12 +306,18 @@ impl Humans {
     }
 
     /// A free place at random; none free, nobody gets on.
-    pub(super) fn reserve_place(&mut self, bus: BusId, n: usize) -> Option<usize> {
+    /// sub_7e910c: a free place at random, a seat first with `prefer_seats`; none free,
+    /// nobody gets on.
+    pub(super) fn reserve_place(&mut self, bus: BusId, places: &[Seat]) -> Option<usize> {
+        let n = places.len();
         let seats = self.seats.entry(bus).or_insert_with(|| vec![false; n]);
         if seats.len() < n {
             seats.resize(n, false);
         }
-        let free: Vec<usize> = (0..n).filter(|k| !seats[*k]).collect();
+        let mut free: Vec<usize> = (0..n).filter(|k| !seats[*k]).collect();
+        if self.prefer_seats && free.iter().any(|&k| places[k].seated) {
+            free.retain(|&k| places[k].seated);
+        }
         if free.is_empty() {
             return None;
         }
@@ -1112,7 +1118,7 @@ impl Humans {
                 if let Some(bn) =
                     bn.filter(|bn| bn.speed.abs() < 3.0 && self.in_stop_box(stop, bn.id))
                 {
-                    if let Some(k) = self.reserve_place(bn.id, bn.cabin.seats.len()) {
+                    if let Some(k) = self.reserve_place(bn.id, &bn.cabin.seats) {
                         let (ticket, id) = self.decide_pax_ticket(i, bn);
                         let price = self
                             .tickets
@@ -1419,6 +1425,60 @@ mod tests {
         assert_eq!(pick(&[9.0, 9.0, 0.0], false), Some(2));
         let shut = [false; 3];
         assert_eq!(least_busy_entry(&points, here, &list, false, &flags, &shut, &[0.0; 3]), Some(2));
+    }
+
+    #[test]
+    fn seat_preference_respects_reservations_capacity_and_released_seats() {
+        let places: Vec<Seat> = [false, true, false, true]
+            .into_iter()
+            .enumerate()
+            .map(|(omsi_seat, seated)| Seat {
+                pos: Vec3::ZERO,
+                floor: Vec3::ZERO,
+                rot: 0.0,
+                seated,
+                height: if seated { 0.45 } else { 0.0 },
+                omsi_seat,
+            })
+            .collect();
+        let mut h = Humans::new(Path::new("/nonexistent"));
+        h.prefer_seats = true;
+        for bus in [BusId::Player, BusId::Ai(42)] {
+            // one seated place is already reserved, by a walker or an avatar
+            h.seats.insert(bus, vec![false, true, false, false]);
+            assert_eq!(h.reserve_place(bus, &places), Some(3));
+            let a = h.reserve_place(bus, &places).unwrap();
+            let b = h.reserve_place(bus, &places).unwrap();
+            assert!(!places[a].seated && !places[b].seated && a != b);
+            assert_eq!(h.reserve_place(bus, &places), None);
+            h.free_seat(bus, 1);
+            assert_eq!(h.reserve_place(bus, &places), Some(1));
+        }
+        assert_eq!(h.reserve_place(BusId::Player, &[]), None);
+    }
+
+    #[test]
+    fn seat_preference_off_preserves_random_place_selection() {
+        let places = [false, true].map(|seated| Seat {
+            pos: Vec3::ZERO,
+            floor: Vec3::ZERO,
+            rot: 0.0,
+            seated,
+            height: if seated { 0.45 } else { 0.0 },
+            omsi_seat: 0,
+        });
+        let mut h = Humans::new(Path::new("/nonexistent"));
+        assert!(!h.prefer_seats);
+        let mut reference = Humans::new(Path::new("/nonexistent"));
+        let mut seen = [false; 2];
+        for _ in 0..32 {
+            let expected = (reference.rand() as usize) % places.len();
+            let k = h.reserve_place(BusId::Player, &places).unwrap();
+            assert_eq!(k, expected);
+            seen[k] = true;
+            h.free_seat(BusId::Player, k);
+        }
+        assert_eq!(seen, [true, true]);
     }
 
     #[test]

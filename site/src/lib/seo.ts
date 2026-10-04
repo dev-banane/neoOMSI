@@ -90,9 +90,9 @@ const STATIC: Record<string, Omit<Meta, 'path'>> = {
     schema: [faqPage(FAQ), crumbs(['FAQ', '/faq/'])],
   },
   '/openomsi': {
-    title: 'neoOMSI vs openOMSI: how the openOMSI fork compares',
+    title: 'neoOMSI vs openOMSI: how the two OMSI 2 recreations compare',
     description:
-      'neoOMSI started as a fork of openOMSI. Compare the two OMSI 2 recreations in Rust by license, platforms and compatibility focus, and see how to switch to neoOMSI.',
+      'neoOMSI and openOMSI both let you play OMSI 2 with your own maps, buses and mods. See how they differ and how to switch to neoOMSI.',
     type: 'article',
     schema: [faqPage(OPENOMSI_FAQ), crumbs(['neoOMSI vs openOMSI', '/openomsi/'])],
   },

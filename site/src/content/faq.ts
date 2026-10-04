@@ -54,7 +54,7 @@ export const FAQ: Question[] = [
   },
   {
     q: 'What is the difference between neoOMSI and openOMSI?',
-    a: 'neoOMSI started as a fork of openOMSI and is now developed independently. Both are Rust recreations of OMSI 2 that need an installed copy of the game. neoOMSI is licensed under GPL-3.0-or-later instead of MIT and verifies its behavior against OMSI 2.2.032 with a documented process and regression tests.',
+    a: 'neoOMSI is built to be the more stable choice. Two team members check every change, and changes are bundled into proper releases that are tested before they come out. Both are separate projects that play your own OMSI 2 maps, buses and mods.',
   },
   {
     q: 'Is neoOMSI affiliated with the makers of OMSI 2?',
@@ -81,15 +81,15 @@ export const HOME_FAQ = FAQ.filter((f) =>
 export const OPENOMSI_FAQ: Question[] = [
   {
     q: 'Is neoOMSI the same as openOMSI?',
-    a: 'No. neoOMSI started as a fork of openOMSI and is now a separate project with its own name, license, releases and issue tracker.',
+    a: 'No. neoOMSI is a separate project with its own team, releases and place to report bugs.',
   },
   {
-    q: 'Is neoOMSI based on openOMSI?',
-    a: 'Yes. neoOMSI was originally forked from openOMSI by usonskyyyy. The code inherited from openOMSI stays under the MIT license and is credited in the NOTICE file of the neoOMSI repository. Everything neoOMSI adds is licensed under GPL-3.0-or-later.',
+    q: 'Does neoOMSI contain code from openOMSI?',
+    a: "Some of neoOMSI's early code came from openOMSI by usonskyyyy. It is credited in the NOTICE file of the neoOMSI repository.",
   },
   {
     q: 'Is neoOMSI affiliated with openOMSI?',
-    a: 'No. neoOMSI is developed independently and is not endorsed by the openOMSI maintainers.',
+    a: 'No. neoOMSI is made by a different team and is not endorsed by the openOMSI team.',
   },
   {
     q: 'Do neoOMSI and openOMSI both need OMSI 2?',

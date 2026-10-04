@@ -98,7 +98,7 @@ const summary = `# neoOMSI
 
 > ${s.DESCRIPTION}
 
-neoOMSI needs an installed copy of OMSI 2 and contains no game content of its own. It targets the observable behavior of OMSI 2.2.032 and is licensed under GPL-3.0-or-later. It started as a fork of openOMSI and is developed independently.
+neoOMSI needs an installed copy of OMSI 2 and contains no game content of its own. It targets the observable behavior of OMSI 2.2.032 and is licensed under GPL-3.0-or-later. It is a separate project from openOMSI.
 `
 
 write(

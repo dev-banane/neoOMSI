@@ -84,9 +84,6 @@ pub(crate) struct Player {
     /// Coupled-part mesh currently pressed.  Articulated buses keep the rear controls in
     /// the trailer model, while their mouse events are still handled by the lead vehicle.
     pub(crate) pressed_trailer_mesh: Option<(usize, usize)>,
-    /// Set while the camera looks at the bus from outside (F3): a switch behind a wall or a
-    /// window of the bus is out of reach there, and is neither named, clicked nor turned.
-    pub(crate) occlude_controls: bool,
     /// The press on `pressed_mesh`: whether the script has a trigger for the click itself,
     /// and how far the mouse has been dragged since (px).
     pub(crate) press_info: (bool, f32),
@@ -381,12 +378,12 @@ fn doorways(ty: &omsi_sim::VehicleType) -> Option<Vec<Vec<String>>> {
         }
         let parts: Vec<Vec<String>> = match (g.first(), g.get(1)) {
             (Some(a), Some(b))
-                if !reach(a).is_empty()
-                    && !reach(b).is_empty()
-                    && !reach(a).iter().any(|w| reach(b).contains(w)) =>
-            {
-                vec![vec![a.clone()], vec![b.clone()]]
-            }
+            if !reach(a).is_empty()
+                && !reach(b).is_empty()
+                && !reach(a).iter().any(|w| reach(b).contains(w)) =>
+                {
+                    vec![vec![a.clone()], vec![b.clone()]]
+                }
             _ => vec![g.clone()],
         };
         for part in parts {
@@ -507,8 +504,8 @@ pub(crate) fn door_trigger_closes(program: &omsi_script::Program, name: &str) ->
     };
     if b.ops.len() > 6
         || b.ops
-            .iter()
-            .any(|op| matches!(op, omsi_script::Op::Macro(_)))
+        .iter()
+        .any(|op| matches!(op, omsi_script::Op::Macro(_)))
     {
         return false;
     }
@@ -1061,7 +1058,7 @@ impl Player {
                 } else {
                     "Putting the vehicle into service ..."
                 }
-                .to_string();
+                    .to_string();
             }
             log::info!("auto-start given up after 20 s: begun again");
         }
@@ -1135,11 +1132,11 @@ impl Player {
         let headlights_off = self.vehicle.var("Spot_Select").is_some_and(|s| s < 0.0);
         if headlights_off
             && self
-                .vehicle
-                .ty
-                .program
-                .trigger("kw_scheinwerfer_toggle")
-                .is_some()
+            .vehicle
+            .ty
+            .program
+            .trigger("kw_scheinwerfer_toggle")
+            .is_some()
         {
             self.action("kw_scheinwerfer_toggle", true);
             self.action("kw_scheinwerfer_toggle", false);
@@ -1648,8 +1645,8 @@ impl Player {
             "motor_n",
             "motor_rpm",
         ]
-        .iter()
-        .find_map(|v| self.vehicle.var(v)) else {
+            .iter()
+            .find_map(|v| self.vehicle.var(v)) else {
             return;
         };
         let kmh = self.vehicle.physics.velocity_kmh().abs();
@@ -1768,6 +1765,16 @@ impl Player {
                 }
             }
         }
+        self.tick_sounds(audio, inside, listener_follows_bus, true);
+    }
+
+    pub(crate) fn tick_sounds(
+        &mut self,
+        audio: Option<&omsi_audio::AudioEngine>,
+        inside: bool,
+        listener_follows_bus: bool,
+        driven: bool,
+    ) {
         let fired: Vec<String> = std::mem::take(&mut self.vehicle.host.fired_triggers);
         let fired_vars: Vec<(String, Vec<f32>)> =
             std::mem::take(&mut self.vehicle.host.fired_trigger_vars);
@@ -1782,16 +1789,18 @@ impl Player {
             let v = &self.vehicle;
             // the camera decides which `[viewpoint]` entries are heard (the exterior engine
             // samples outside, the rain on the roof in the cab)
-            ss.set_inside(inside);
+            ss.set_inside(inside && driven);
             ss.set_muffled(inside);
-            ss.set_listener_vehicle(listener_follows_bus);
+            ss.set_listener_vehicle(listener_follows_bus && driven);
             // how open the bus is to the outside (doors, driver's window) for every outside
             // sound heard in it - this bus's own and the traffic's
-            omsi_audio::soundset::set_outside_open(if inside {
-                v.var("Snd_OutsideVol")
-            } else {
-                None
-            });
+            if driven {
+                omsi_audio::soundset::set_outside_open(if inside {
+                    v.var("Snd_OutsideVol")
+                } else {
+                    None
+                });
+            }
             // (the last time a trigger fired this frame: its sounds start with that moment)
             let at_fire = |t: &str, n: &str| -> Option<f32> {
                 let vals = &fired_vars
@@ -1905,8 +1914,8 @@ impl Player {
     /// `spread` is the half-angle of those rings in radians; the window passes the angle
     /// six pixels subtend, so aiming is equally forgiving at any resolution.
     pub(crate) fn pick(&self, origin: DVec3, dir: Vec3, spread: f32) -> Option<usize> {
-        let i = pick_in(&self.vehicle, origin, dir, spread)?;
-        if self.occlude_controls && self.control_hidden(origin, dir, None, i) {
+        let (i, hit_dir) = pick_in(&self.vehicle, origin, dir, spread)?;
+        if self.control_hidden(origin, hit_dir, None, i) {
             return None;
         }
         Some(i)
@@ -1937,8 +1946,8 @@ impl Player {
         dir: Vec3,
         spread: f32,
     ) -> Option<(usize, usize)> {
-        let (ti, i) = pick_trailer_in(&self.vehicle, origin, dir, spread)?;
-        if self.occlude_controls && self.control_hidden(origin, dir, Some(ti), i) {
+        let ((ti, i), hit_dir) = pick_trailer_in(&self.vehicle, origin, dir, spread)?;
+        if self.control_hidden(origin, hit_dir, Some(ti), i) {
             return None;
         }
         Some((ti, i))
@@ -1948,7 +1957,7 @@ impl Player {
     /// This runs when the mouse moves, not for every headset frame.
     #[cfg_attr(not(windows), allow(dead_code))]
     pub(crate) fn surface_hit(&self, origin: DVec3, dir: Vec3) -> Option<DVec3> {
-        let (mut nearest, nearest_control) = self.nearest_hits(origin, dir);
+        let (mut nearest, nearest_control) = self.nearest_hits(origin, dir, None);
         if nearest_control.is_finite() {
             nearest = nearest_control;
         }
@@ -1957,10 +1966,10 @@ impl Player {
 
     /// How far along a ray the bus (any visible mesh, trailers too) is.
     pub(crate) fn body_hit(&self, origin: DVec3, dir: Vec3) -> Option<f32> {
-        Some(self.nearest_hits(origin, dir).0).filter(|t| t.is_finite())
+        Some(self.nearest_hits(origin, dir, None).0).filter(|t| t.is_finite())
     }
 
-    /// Seen from outside: the body of the bus (a wall, a window) is hit before the control
+    /// The body of the bus (a wall, a window, a dashboard) is hit before the control
     /// mesh `i` (of coupled part `trailer`, or of the bus itself), so it cannot be reached.
     fn control_hidden(&self, origin: DVec3, dir: Vec3, trailer: Option<usize>, i: usize) -> bool {
         let (ty, position, xf) = match trailer {
@@ -1974,11 +1983,17 @@ impl Player {
                 (&t.ty, t.position, t.mesh_local_transform(i))
             }
         };
+        let dir = dir.normalize_or_zero();
+        let o = (origin - position).as_vec3();
+        // exact test: any other part of the bus met earlier takes the click
+        if let Some(t) = omsi_geometry::ray_mesh(o, dir, &ty.meshes[i].data, &xf) {
+            let other = self.nearest_hits(origin, dir, Some((trailer, i))).0;
+            return in_front_of(other, t);
+        }
+        // only the spread around the ray reached it: judge by its bounding sphere
         let Some(&(c, r)) = ty.mesh_bounds.get(i) else {
             return false;
         };
-        let dir = dir.normalize_or_zero();
-        let o = (origin - position).as_vec3();
         let scale = xf
             .x_axis
             .truncate()
@@ -1986,19 +2001,24 @@ impl Player {
             .max(xf.y_axis.truncate().length())
             .max(xf.z_axis.truncate().length());
         let along = (xf.transform_point3(c) - o).dot(dir);
-        let nearest = self.nearest_hits(origin, dir).0;
+        let nearest = self.nearest_hits(origin, dir, Some((trailer, i))).0;
         nearest < along - r * scale - 0.1
     }
 
     /// The nearest hit of a ray on the bus, and the nearest on a mesh with a mouse event
     /// (infinite: none).
-    fn nearest_hits(&self, origin: DVec3, dir: Vec3) -> (f32, f32) {
+    fn nearest_hits(
+        &self,
+        origin: DVec3,
+        dir: Vec3,
+        skip: Option<(Option<usize>, usize)>,
+    ) -> (f32, f32) {
         let mut nearest = f32::INFINITY;
         let mut nearest_control = f32::INFINITY;
         let vehicle = &self.vehicle;
         let o = (origin - vehicle.position).as_vec3();
         for (i, mesh) in vehicle.ty.meshes.iter().enumerate() {
-            if !vehicle.mesh_props[i].visible {
+            if !vehicle.mesh_props[i].visible || skip == Some((None, i)) {
                 continue;
             }
             let transform = vehicle.mesh_local_transform(i);
@@ -2020,10 +2040,10 @@ impl Player {
                 }
             }
         }
-        for trailer in &vehicle.trailers {
+        for (ti, trailer) in vehicle.trailers.iter().enumerate() {
             let o = (origin - trailer.position).as_vec3();
             for (i, mesh) in trailer.ty.meshes.iter().enumerate() {
-                if !trailer.mesh_props[i].visible {
+                if !trailer.mesh_props[i].visible || skip == Some((Some(ti), i)) {
                     continue;
                 }
                 let transform = trailer.mesh_local_transform(i);
@@ -2408,10 +2428,10 @@ impl Player {
         let (eye, yaw, pitch, roll) = self.vehicle.camera_world_full(turned);
         let eye = eye
             + self
-                .vehicle
-                .body_rotation()
-                .transform_vector3(self.head + self.seat)
-                .as_dvec3();
+            .vehicle
+            .body_rotation()
+            .transform_vector3(self.head + self.seat)
+            .as_dvec3();
         Camera {
             position: eye,
             yaw,
@@ -2485,11 +2505,11 @@ impl Player {
     pub(crate) fn pax_camera_count(&self) -> usize {
         self.vehicle.ty.def.cameras_pax.len()
             + self
-                .vehicle
-                .trailers
-                .iter()
-                .map(|t| t.ty.def.cameras_pax.len())
-                .sum::<usize>()
+            .vehicle
+            .trailers
+            .iter()
+            .map(|t| t.ty.def.cameras_pax.len())
+            .sum::<usize>()
     }
 
     /// How many driver cameras the bus has, its coupled parts' included: Omsi.exe's
@@ -2498,11 +2518,11 @@ impl Player {
     pub(crate) fn driver_camera_count(&self) -> usize {
         self.vehicle.ty.def.cameras_driver.len()
             + self
-                .vehicle
-                .trailers
-                .iter()
-                .map(|t| t.ty.def.cameras_driver.len())
-                .sum::<usize>()
+            .vehicle
+            .trailers
+            .iter()
+            .map(|t| t.ty.def.cameras_driver.len())
+            .sum::<usize>()
     }
 
     /// The driver camera chosen past the front's own: the coupled part it is on and the
@@ -2640,10 +2660,10 @@ impl Player {
                     yaw: c.yaw
                         + look.0
                         + if view == "driver" {
-                            self.steer_look
-                        } else {
-                            0.0
-                        },
+                        self.steer_look
+                    } else {
+                        0.0
+                    },
                     pitch: (c.pitch + look.1).clamp(-89.0, 89.0),
                     ..c.clone()
                 };
@@ -2696,8 +2716,8 @@ impl Player {
 pub(crate) fn orbit_pivot(position: DVec3, heading_deg: f64, center: [f32; 3]) -> DVec3 {
     position
         + glam::Mat4::from_rotation_z((-(heading_deg as f32)).to_radians())
-            .transform_point3(Vec3::new(center[0], center[1], center[2]))
-            .as_dvec3()
+        .transform_point3(Vec3::new(center[0], center[1], center[2]))
+        .as_dvec3()
 }
 
 /// Put a vehicle's meshes where its state says (animations, visibility, lights, the
@@ -2797,7 +2817,7 @@ pub(crate) fn pick_in(
     origin: DVec3,
     dir: Vec3,
     spread: f32,
-) -> Option<usize> {
+) -> Option<(usize, Vec3)> {
     let o = (origin - vehicle.position).as_vec3();
     let right = Vec3::new(-dir.y, dir.x, 0.0).normalize_or_zero();
     let up = dir.cross(right).normalize_or_zero();
@@ -2839,20 +2859,20 @@ pub(crate) fn pick_in(
         })
         .collect();
     for dirs in &rings {
-        let mut best: Option<(f32, usize)> = None;
+        let mut best: Option<(f32, usize, Vec3)> = None;
         for (i, xf, tris) in &candidates {
             let (i, xf) = (*i, *xf);
             let vm = &vehicle.ty.meshes[i];
             for d in dirs {
                 if let Some(t) = omsi_geometry::ray_triangles(o, *d, &vm.data, &xf, tris) {
-                    if best.map(|(bt, _)| t < bt).unwrap_or(true) {
-                        best = Some((t, i));
+                    if best.map(|(bt, _, _)| t < bt).unwrap_or(true) {
+                        best = Some((t, i, *d));
                     }
                 }
             }
         }
-        if let Some((_, i)) = best {
-            return Some(i);
+        if let Some((_, i, d)) = best {
+            return Some((i, d));
         }
     }
     None
@@ -2927,7 +2947,7 @@ pub(crate) fn pick_trailer_in(
     origin: DVec3,
     dir: Vec3,
     spread: f32,
-) -> Option<(usize, usize)> {
+) -> Option<((usize, usize), Vec3)> {
     let right = Vec3::new(-dir.y, dir.x, 0.0).normalize_or_zero();
     let up = dir.cross(right).normalize_or_zero();
     let mut rings: Vec<Vec<Vec3>> = vec![vec![dir]];
@@ -2973,7 +2993,7 @@ pub(crate) fn pick_trailer_in(
         })
         .collect();
     for dirs in &rings {
-        let mut best: Option<(f32, usize, usize)> = None;
+        let mut best: Option<(f32, usize, usize, Vec3)> = None;
         for (ti, i, xf, tris) in &candidates {
             let (ti, i, xf) = (*ti, *i, *xf);
             let trailer = &vehicle.trailers[ti];
@@ -2981,17 +3001,59 @@ pub(crate) fn pick_trailer_in(
             let vm = &trailer.ty.meshes[i];
             for d in dirs {
                 if let Some(t) = omsi_geometry::ray_triangles(o, *d, &vm.data, &xf, tris) {
-                    if best.map(|(bt, _, _)| t < bt).unwrap_or(true) {
-                        best = Some((t, ti, i));
+                    if best.map(|(bt, _, _, _)| t < bt).unwrap_or(true) {
+                        best = Some((t, ti, i, *d));
                     }
                 }
             }
         }
-        if let Some((_, ti, i)) = best {
-            return Some((ti, i));
+        if let Some((_, ti, i, d)) = best {
+            return Some(((ti, i), d));
         }
     }
     None
+}
+
+/// Whether a hit at `other` metres is in front of the control hit at `control`; the slack
+/// keeps a button flush with its panel reachable.
+fn in_front_of(other: f32, control: f32) -> bool {
+    other < control - 0.03
+}
+
+#[cfg(test)]
+mod occlusion_tests {
+    use super::in_front_of;
+    use glam::{Mat4, Vec3};
+    use omsi_geometry::{MeshData, ray_mesh};
+
+    /// A square facing the ray, `z` metres along it.
+    fn wall(z: f32) -> MeshData {
+        MeshData {
+            positions: vec![
+                Vec3::new(-1.0, z, -1.0),
+                Vec3::new(1.0, z, -1.0),
+                Vec3::new(0.0, z, 1.0),
+            ],
+            indices: vec![0, 1, 2],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_dashboard_in_front_of_a_hatch_takes_the_click() {
+        let (o, d) = (Vec3::ZERO, Vec3::Y);
+        let hatch = ray_mesh(o, d, &wall(2.0), &Mat4::IDENTITY).unwrap();
+        let dash = ray_mesh(o, d, &wall(0.6), &Mat4::IDENTITY).unwrap();
+        assert!(in_front_of(dash, hatch));
+        assert!(!in_front_of(hatch, dash));
+    }
+
+    #[test]
+    fn a_button_flush_with_its_panel_stays_reachable() {
+        assert!(!in_front_of(1.0, 1.005));
+        assert!(!in_front_of(1.0, 1.0));
+        assert!(!in_front_of(f32::INFINITY, 1.0));
+    }
 }
 
 /// Mouse steering switched off: the wheel stays where the mouse left it and the keys go on

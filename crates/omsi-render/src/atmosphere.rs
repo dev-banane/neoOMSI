@@ -53,7 +53,6 @@ const SHADE_ADAPTATION: f32 = 0.3;
 /// Irradiance of a sunlit and sky-lit horizontal surface at noon, the exposure reference.
 const DAY_REFERENCE: f32 = 11.0;
 
-/// What the sky is made of at a moment.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SkyInput {
     /// Towards the sun, world space (x east, y north, z up).
@@ -88,7 +87,6 @@ impl Default for SkyInput {
     }
 }
 
-/// The light of the sky for one `SkyInput`.
 #[derive(Debug, Clone)]
 pub struct SkyState {
     pub input: SkyInput,
@@ -187,24 +185,20 @@ fn depth_table() -> &'static DepthTable {
     TABLE.get_or_init(DepthTable::build)
 }
 
-/// Air, aerosol and ozone density (relative to sea level) at altitude h.
 fn densities(h: f32) -> [f32; 3] {
     let ozone = (1.0 - (h - 25_000.0).abs() / 15_000.0).max(0.0);
     [(-h / RAYLEIGH_H).exp(), (-h / MIE_H).exp(), ozone]
 }
 
-/// Altitude after `t` metres from radius r0 along a ray with zenith cosine mu.
 fn altitude(r0: f32, mu: f32, t: f32) -> f32 {
     (r0 * r0 + t * t + 2.0 * r0 * t * mu).max(0.0).sqrt() - EARTH_R
 }
 
-/// Distance to where the ray leaves the sphere of radius `radius` (the origin is inside).
 fn ray_exit(r0: f32, mu: f32, radius: f32) -> f32 {
     let disc = r0 * r0 * (mu * mu - 1.0) + radius * radius;
     -r0 * mu + disc.max(0.0).sqrt()
 }
 
-/// Distance to the ground along the ray, if it meets it.
 fn ray_hits_ground(r0: f32, mu: f32) -> Option<f32> {
     if mu >= 0.0 {
         return None;
@@ -225,20 +219,17 @@ fn rayleigh_phase(c: f32) -> f32 {
     3.0 / (16.0 * std::f32::consts::PI) * (1.0 + c * c)
 }
 
-/// Cornette-Shanks aerosol phase function.
 fn mie_phase(c: f32, g: f32) -> f32 {
     let g2 = g * g;
     3.0 / (8.0 * std::f32::consts::PI) * ((1.0 - g2) * (1.0 + c * c))
         / ((2.0 + g2) * (1.0 + g2 - 2.0 * g * c).max(1e-4).powf(1.5))
 }
 
-/// Elevation (radians) of the centre of table row `v` in 0..1.
 pub fn lut_elevation(v: f32) -> f32 {
     let s = (v - 0.5) * 2.0;
     s.signum() * s * s * std::f32::consts::FRAC_PI_2
 }
 
-/// Table row coordinate (0..1) of an elevation in radians.
 pub fn lut_row(el: f32) -> f32 {
     0.5 + 0.5 * el.signum() * (el.abs() / std::f32::consts::FRAC_PI_2).min(1.0).sqrt()
 }
@@ -248,7 +239,6 @@ fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
-/// Real spherical harmonics up to order 2 in direction d.
 fn sh_basis(d: Vec3) -> [f32; 9] {
     [
         0.282_095,
@@ -263,7 +253,6 @@ fn sh_basis(d: Vec3) -> [f32; 9] {
     ]
 }
 
-/// Evaluate irradiance SH (as produced in `SkyState::sh`) for a surface normal.
 pub fn sh_irradiance(sh: &[Vec3; 9], n: Vec3) -> Vec3 {
     let y = sh_basis(n);
     sh.iter()
@@ -294,7 +283,6 @@ struct RawSky {
 }
 
 impl SkyState {
-    /// The sky, the sun and the ambient light for this input.
     pub fn compute(input: &SkyInput) -> SkyState {
         let raw = Self::compute_raw(input);
         let white = daylight_white();
@@ -330,7 +318,6 @@ impl SkyState {
                 lut.push(l + NIGHT_SKY * night_light);
             }
         }
-        // irradiance on a horizontal surface from the open sky
         let sun_az = s.y.atan2(s.x);
         let mut sky_horizontal = Vec3::ZERO;
         let az_step = std::f32::consts::PI / w as f32;
@@ -443,8 +430,6 @@ impl SkyState {
         }
     }
 
-    /// Single scattering (plus the multiple-scattering estimate) before white balance,
-    /// clouds and tints.
     fn compute_raw(input: &SkyInput) -> RawSky {
         let table = depth_table();
         let s = input.sun_dir.normalize_or_zero();
@@ -479,7 +464,6 @@ impl SkyState {
                     prev_t = t1;
                     let hh = altitude(r0, mu, t);
                     let dens = densities(hh);
-                    // the view path up to the middle of this step
                     let half = [
                         view_depth[0] + dens[0] * dt * 0.5,
                         view_depth[1] + dens[1] * dt * 0.5,
@@ -508,7 +492,6 @@ impl SkyState {
                 lut.push(acc * SUN_E0);
             }
         }
-        // irradiance of a horizontal surface from the clear sky
         let mut sky_horizontal = Vec3::ZERO;
         let az_step = std::f32::consts::PI / w as f32;
         for row in (h / 2)..h {
@@ -530,7 +513,6 @@ impl SkyState {
     }
 }
 
-/// The SH of a uniformly bright lower hemisphere (the ground).
 fn ground_sh(l: Vec3) -> [Vec3; 9] {
     // projection of the lower half-sphere indicator: Y00 · 2π, Y10 · -π, Y20 · 0
     let mut out = [Vec3::ZERO; 9];
@@ -548,7 +530,6 @@ pub fn exposure_for(e_ref: f32) -> f32 {
     1.25 * std::f32::consts::PI / (e_ref.max(1e-6).powf(ADAPT) * DAY_REFERENCE.powf(1.0 - ADAPT))
 }
 
-/// A half float from a float (for the sky table's upload).
 pub fn f16_bits(v: f32) -> u16 {
     let bits = v.to_bits();
     let sign = ((bits >> 16) & 0x8000) as u16;
@@ -590,7 +571,6 @@ mod tests {
             ..Default::default()
         });
         let global = s.sun * 0.866 + s.sky_horizontal;
-        // the camera is balanced for this light
         assert!(
             (global.x / global.y - 1.0).abs() < 0.02 && (global.z / global.y - 1.0).abs() < 0.02,
             "{global:?}"
@@ -736,7 +716,6 @@ mod tests {
                         el.to_radians().cos() * a.sin(),
                         el.to_radians().sin(),
                     );
-                    // the table cell nearest to d
                     let az = {
                         let (s2, d2) = (
                             glam::Vec2::new(input.sun_dir.x, input.sun_dir.y).normalize(),
@@ -784,7 +763,7 @@ mod tests {
 
     #[test]
     fn half_floats() {
-        for v in [0.0f32, 1.0, -2.5, 0.5, 65504.0, 1e-3, 3.140625] {
+        for v in [0.0f32, 1.0, -2.5, 0.5, 65504.0, 1e-3, std::f32::consts::PI] {
             let b = f16_bits(v);
             let sign = if b & 0x8000 != 0 { -1.0 } else { 1.0 };
             let e = ((b >> 10) & 0x1f) as i32;

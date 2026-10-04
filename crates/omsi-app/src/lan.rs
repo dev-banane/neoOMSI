@@ -1,24 +1,3 @@
-//! LAN play in the game: starting a session from the command line, taking the host's
-//! world, what we send about our bus, the other players' buses (drawn and heard), putting
-//! our bus where nobody stands, the chat line and the lines the HUD and the launcher show.
-//!
-//! The transport is `omsi-net`. The game adds what needs the world:
-//! - a joining player takes the host's date, time of day, weather and season before its
-//!   map is loaded (`adopt_host_world`), and the host's clock keeps it in step afterwards;
-//! - the footprints of the host's vehicles, and placing a joining player's bus in front of
-//!   or behind whatever stands at its entry point (along the road);
-//! - the remote states as vehicles: the other player's vehicle type runs as an AI copy
-//!   whose pose comes off the network, fed the pedals, lights, indicators and doors as its
-//!   AI scripts expect them, with the model's own lamp, `[visible]`, sound and moving-part
-//!   variables pinned to the sender's values (`SyncTable`); its outside sounds (`[sound_ai]`
-//!   plus the horn and indicator relay of `[sound]`) play where it stands;
-//! - the chat line (V to type, Enter to send) with join and leave notices.
-//!
-//! While a session runs the game keeps `~/.neoomsi/lan/<instance>.json` up to date
-//! (role, session code, address, players, warnings), which is where the launcher reads the
-//! code to show it with a copy button. `<instance>` is the id the launcher gives the game in
-//! `OMSI_INSTANCE`, else the process id.
-
 use crate::scene::{self, World};
 use crate::{Args, Player};
 use glam::DVec3;
@@ -32,49 +11,30 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use winit::keyboard::KeyCode;
 
-/// How long a joining player's game waits for the host's welcome (its world) before the
-/// map is loaded, and for the host's list of what stands at the spawn.
 pub const WELCOME_WAIT: Duration = Duration::from_secs(3);
-/// How long a joining game waits for the host's welcome before it loads a map: a host busy
-/// loading a heavy part of a big map answered after the 3 s it used to wait, and the player
-/// was left on the map chosen before joining, where nobody ever met them.
+/// A host busy loading a heavy part of a big map can take longer than 3 s to answer.
 pub const HOST_ANSWER_WAIT: Duration = Duration::from_secs(8);
-/// Room kept free between two buses placed one behind the other (m).
 const GAP_ALONG: f64 = 3.0;
-/// ... and side by side (m).
 const GAP_ACROSS: f64 = 1.0;
-/// The largest vehicle file loaded for another player (a `.bus` is a few hundred KB).
 const MAX_VEHICLE_FILE: u64 = 16 << 20;
-/// Other players' buses are heard within this distance (m), and fall silent beyond 1.2 times it.
 const HEAR_RANGE: f64 = 250.0;
-/// A clock further off the host's than this (s) is set; a smaller difference is caught up.
 const CLOCK_JUMP: f64 = 2.0;
-/// Chat lines shown, and for how long (s).
 const CHAT_LINES: usize = 6;
 
-/// Stable random seed shared by all processes in one LAN room.
 pub fn population_seed(session: &LanSession) -> u64 {
     session.session ^ 0x4F4D_5349_4C41_4E31
 }
 
-// ---------------------------------------------------------------------------------------
-// what of a vehicle goes over the network
-
-/// The variables of a vehicle type the state carries beyond the pose, the same on every
-/// machine for the same files: the lamps of its model (`[matl_lightmap]`, `[matl_change]`,
-/// `[light_enh]`, `[light_enh_2]`, `[interiorlight]`), its `[visible]` switches, and the
-/// variables its outside sounds follow (volume curves, pitch, conditions) together with
-/// those of the parts that move where they can be seen (wipers, ramps, doors not animated
-/// by `door_N`). Each list is sorted by name, so both games agree on the order; `hash`
-/// tells when they do not (another version of the vehicle).
+/// Each list is sorted by name so both games agree on the order; `hash` differs when the
+/// vehicle files do.
 pub struct SyncTable {
     pub lamps: Vec<(String, VarId)>,
     pub switches: Vec<(String, VarId)>,
     pub values: Vec<(String, VarId)>,
-    /// `door_0`, `door_1` … as far as the scripts have them.
     pub doors: Vec<VarId>,
+    /// Not in `hash`: a game without these still takes the rest of the table.
+    ibis: Vec<Option<VarId>>,
     pub hash: u32,
-    /// Variables of the horn: its switch and the volume its sound follows.
     horn: Vec<VarId>,
     engine_n: Option<VarId>,
     ai_engine: Option<VarId>,
@@ -82,16 +42,27 @@ pub struct SyncTable {
     ai_interior: Option<VarId>,
     throttle: Option<VarId>,
     brake: Option<VarId>,
-    /// The outside sounds: `[sound_ai]` (or `[sound]`), and the horn and indicator relay
-    /// entries of `[sound]` - with the folder their files are in.
     sounds: Vec<(Arc<omsi_vehicle::SoundCfg>, PathBuf)>,
-    /// The whole `[sound]` set, heard from inside by whoever rides in the bus.
     interior: Option<(Arc<omsi_vehicle::SoundCfg>, PathBuf)>,
-    /// The rear sections' outside sounds (`[sound_ai]`, or `[sound]`), by section.
     part_sounds: Vec<(usize, Arc<omsi_vehicle::SoundCfg>, PathBuf)>,
 }
 
-/// Engine variables every copy works out for itself (or that come in the pose).
+/// Indexed by `Pose::ibis`: append only.
+const IBIS_VARS: [&str; 6] = [
+    "IBIS_Linie_Complex",
+    "IBIS_Linie_Suffix",
+    "IBIS_LinieKurs",
+    "IBIS_TerminusIndex",
+    "IBIS_TerminusCode",
+    "IBIS_RouteIndex",
+];
+
+/// Both games must agree on the depot file: the terminus indices of `IBIS_VARS` point into it.
+fn hof_key(h: &omsi_vehicle::Hof) -> u32 {
+    let key = format!("{}|{}", h.name.trim().to_lowercase(), h.termini.len());
+    fnv1a(key.as_bytes()).max(1)
+}
+
 fn engine_fed(name: &str) -> bool {
     const PREFIXES: [&str; 12] = [
         "wheel_",
@@ -112,8 +83,6 @@ fn engine_fed(name: &str) -> bool {
         || matches!(n.as_str(), "n_wheel" | "wetness" | "time" | "timegap")
 }
 
-/// Sound entries of the full `[sound]` set that are heard from outside as well: the horn,
-/// the indicator relay, kneeling.
 fn outside_entry(e: &omsi_vehicle::SoundEntry) -> bool {
     let hit = |s: &str| {
         let l = s.to_ascii_lowercase();
@@ -136,10 +105,8 @@ fn fnv1a(data: &[u8]) -> u32 {
 }
 
 impl SyncTable {
-    /// `parts`: the types of its rear sections, whose lamps, displays, moving parts and
-    /// sounds follow the leading vehicle's variables as its own do (an articulated bus's
-    /// rear section stood dark and silent in the other players' games: none of its
-    /// variables were in the table).
+    /// `parts`: rear sections, whose lamps, displays, moving parts and sounds run on the
+    /// leading vehicle's variables.
     pub fn new(ty: &omsi_sim::VehicleType, parts: &[Arc<omsi_sim::VehicleType>]) -> SyncTable {
         let program = &ty.program;
         let types: Vec<&omsi_sim::VehicleType> = std::iter::once(ty)
@@ -152,7 +119,6 @@ impl SyncTable {
             }
             program.var(n)
         };
-        // names as the program spells them, sorted and unique, capped as the wire allows
         let collect = |names: &mut dyn Iterator<Item = String>,
                        skip: &dyn Fn(&str) -> bool,
                        cap: usize|
@@ -213,7 +179,6 @@ impl SyncTable {
             },
             omsi_net::wire::MAX_SWITCHES,
         );
-        // the outside sounds
         let def = &ty.def;
         let load = |rel: &str| -> Option<(Arc<omsi_vehicle::SoundCfg>, PathBuf)> {
             let path = omsi_cfg::resolve_path(def.dir(), rel);
@@ -252,7 +217,6 @@ impl SyncTable {
                 }
             }
         }
-        // the rear sections' outside sounds, each where its section is
         let mut part_sounds = Vec::new();
         for (k, part) in parts.iter().enumerate() {
             let pdef = &part.def;
@@ -268,8 +232,6 @@ impl SyncTable {
                 }
             }
         }
-        // the variables the outside sounds follow: the leading vehicle's, then the rear
-        // sections' (whatever of the capped list those leave)
         let sound_vars =
             |cfgs: &mut dyn Iterator<Item = &Arc<omsi_vehicle::SoundCfg>>| -> Vec<String> {
                 let mut out = Vec::new();
@@ -286,12 +248,8 @@ impl SyncTable {
             };
         let sound_names = sound_vars(&mut sounds.iter().map(|s| &s.0));
         let part_sound_names = sound_vars(&mut part_sounds.iter().map(|s| &s.1));
-        // what moves where it can be seen
         let mut value_names: Vec<String> = Vec::new();
-        // the parts that move where they can be seen (not the cockpit's switches)
-        // - and the doors opened by hand, whose meshes are clickable: the W906's cab and rear
-        // doors (`[mouseevent] cp_kryshka1_opn`, "kryshka" a Russian mod's word for a
-        // leaf) swung open in the driver's game and stayed shut in everybody else's
+        // "kryshka"/"dver": a Russian W906 mod's hand-opened doors (`cp_kryshka1_opn`).
         const DOORISH: [&str; 6] = ["door", "tuer", "tür", "ramp", "kryshka", "dver"];
         let doorish = |t: &str| {
             let t = t.to_ascii_lowercase();
@@ -318,8 +276,7 @@ impl SyncTable {
                 value_names.extend(m.animations.iter().map(|a| a.variable.clone()));
             }
         }
-        // the water on the windows (the sender's wipers wipe it: another player's bus stood
-        // dry in the rain, its window films left out as engine-fed `rain_` variables)
+        // Window rain films are `rain_` (engine-fed) but follow the sender's wipers.
         let rain_film = |n: &str| n.trim().to_ascii_lowercase().starts_with("rain_window");
         for m in types.iter().flat_map(|t| t.model.meshes.iter()) {
             value_names.extend(
@@ -328,8 +285,6 @@ impl SyncTable {
                     .filter_map(|mat| mat.alphascale.clone())
                     .filter(|n| rain_film(n)),
             );
-            // what scrolls a texture along its slot: a roller blind turning to the next
-            // number (its pictures come in the pose, see `freetex_names`)
             value_names.extend(m.materials.iter().flat_map(|mat| {
                 mat.texcoord_trans_x
                     .iter()
@@ -338,9 +293,8 @@ impl SyncTable {
             }));
         }
         let taken: Vec<VarId> = lamps.iter().chain(&switches).map(|l| l.1).collect();
-        // What is seen first, then the leading vehicle's sounds, then the rear sections',
-        // each sorted by name: the list is capped, and taken as one list in name order the
-        // rear sections' sound variables pushed what is seen out of it.
+        // Visible parts first, then sounds: the list is capped, and sorted as one list the
+        // rear sections' sound variables pushed visible ones out.
         let skip = |n: &str| {
             (engine_fed(n) && !rain_film(n)) || var(n).map(|id| taken.contains(&id)).unwrap_or(true)
         };
@@ -401,6 +355,7 @@ impl SyncTable {
             switches,
             values,
             doors,
+            ibis: IBIS_VARS.iter().map(|n| var(n)).collect(),
             horn,
             engine_n: var("engine_n"),
             ai_engine: var("AI_Engine"),
@@ -430,7 +385,6 @@ impl SyncTable {
     }
 }
 
-/// The sync table of a vehicle type (worked out once per type).
 fn sync_table(game: &mut LanGame, v: &omsi_sim::VehicleInstance) -> Arc<SyncTable> {
     let ty = &v.ty;
     game.tables
@@ -449,11 +403,6 @@ fn sync_table(game: &mut LanGame, v: &omsi_sim::VehicleInstance) -> Arc<SyncTabl
         .clone()
 }
 
-// ---------------------------------------------------------------------------------------
-// the game's side of a session
-
-/// Another player's bus as we draw and hear it: their vehicle type run as an AI vehicle
-/// whose pose comes off the network instead of a lane.
 pub struct RemoteVehicle {
     vehicle: omsi_sim::VehicleInstance,
     render: scene::VehicleRender,
@@ -461,72 +410,46 @@ pub struct RemoteVehicle {
     pub name: String,
     table: Arc<SyncTable>,
     sounds: Vec<omsi_audio::SoundSet>,
-    /// Its `[sound]` heard from inside, while we ride in it (`SyncTable::interior`).
     inside_sounds: Option<omsi_audio::SoundSet>,
-    /// Where the latest pose puts the bus and its rear sections, for smoothing between
-    /// network updates.
     target: (DVec3, f64),
     rear: Vec<(DVec3, f64)>,
-    /// The latest pose's place and when it came (for carrying it on between updates).
     pose_seen: (DVec3, Instant),
-    /// Door openings, suspension travel and the sync table's values as drawn (they glide
-    /// towards the latest state).
     doors: Vec<f32>,
     suspension: Vec<f32>,
     values: Vec<f32>,
-    /// Metres driven, for the wheel rotation (backwards when reversing).
     odometer: f32,
     horn: bool,
-    /// The depot file the destination display is set from.
     hof: Option<Arc<omsi_vehicle::Hof>>,
-    /// The line / destination shown last.
     shown: (String, String),
-    /// Their bus type is not installed here: ours stands in for it.
     pub stand_in: bool,
     pub last: Pose,
-    /// The driver at the wheel (their bus stood empty here), hidden while they walk about.
     driver: Option<crate::driver::DriverFigure>,
     driver_tried: bool,
-    /// Their states by their clock (s), oldest first, and how far our clock (`lan_now`) is
-    /// ahead of theirs as the quickest state showed it: the bus is drawn where their states
-    /// put it a little in the past, between two of them - never pulled towards the newest
-    /// as it happened to arrive (network jitter made it jump a few centimetres at every
-    /// state, and whoever stood in it shook).
+    /// Drawn a little in the past, between two states by their clock: snapping to the
+    /// newest arrival made network jitter shake the bus.
     samples: std::collections::VecDeque<(f64, Pose)>,
     offset: Option<f64>,
-    /// The moment of theirs drawn (see `PlayClock`).
     play: crate::lan_world::PlayClock,
 }
 
 impl RemoteVehicle {
-    /// The LAN player's vehicle as it is drawn here.
     pub fn vehicle(&self) -> &omsi_sim::VehicleInstance {
         &self.vehicle
     }
 }
 
-// The chat's keys are `chat_toggle` and `chat_open` of keyboard.cfg's [game]
-// (`KeyboardCfg::with_game_defaults`: V, and '/' or - where the bus's gear down has '/', as in
-// OMSI's own file - the key left of 1). Not Y for them: the stock file gives that
-// scan code (21) to `scendes_set_z` unmodified and to `view_toggle_informationdisplay` with
-// Ctrl, and a German keyboard's Y is `scendes_set_y`; V (47) is bound to nothing there.
+// Chat keys are V and '/', not Y: stock keyboard.cfg binds Y's scan code to `scendes_set_z`
+// and `view_toggle_informationdisplay`, while V (47) is free.
 
-/// The chat: its lines ("Name: text", "* notice"), oldest first, and the line being typed.
 #[derive(Default)]
 pub struct Chat {
     pub lines: Vec<String>,
-    /// The line being typed: '/' or a click on the chat opens it, Enter sends it, Escape
-    /// drops it.
     pub typing: Option<String>,
-    /// `chat_toggle` (V) hides and shows the chat.
     pub hidden: bool,
-    /// The chat is switched off in the settings: no box, no keys.
     pub disabled: bool,
-    /// What was typed when the line lost the focus (a click elsewhere): back when it opens.
     draft: String,
-    /// Keys pressed while typing: their release is the chat's too.
+    /// Keys pressed while typing: their release belongs to the chat too.
     swallow: hashbrown::HashSet<KeyCode>,
-    /// Why the last line was not sent.
     error: Option<(String, Instant)>,
 }
 
@@ -539,7 +462,6 @@ impl Chat {
         }
     }
 
-    /// Why the last line was not sent, for a few seconds.
     pub fn error(&self) -> Option<&str> {
         self.error
             .as_ref()
@@ -547,7 +469,6 @@ impl Chat {
             .map(|(e, _)| e.as_str())
     }
 
-    /// Open the input box (a click on the chat, the '/' key).
     pub fn open(&mut self) {
         if !self.disabled && self.typing.is_none() {
             self.hidden = false;
@@ -555,8 +476,6 @@ impl Chat {
         }
     }
 
-    /// A click outside the chat takes the focus from the line (as a text box on a web
-    /// page): the keys are the game's again, what was typed waits for the next time.
     pub fn blur(&mut self) {
         if let Some(t) = self.typing.take() {
             self.draft = t;
@@ -564,72 +483,48 @@ impl Chat {
     }
 }
 
-/// A change of the world the host asks for (clients): the game applies it to its clock
-/// and weather.
 #[derive(Debug, Clone, PartialEq)]
 pub enum WorldUpdate {
-    /// Set the clock to this day and time.
     Clock {
         year: i32,
         day_of_year: i32,
         time: f64,
     },
-    /// Move the clock on (or back) by this many seconds.
     Slew(f64),
-    /// Use this weather file (None: the map's default).
     Weather(Option<String>),
-    /// Host: the timetable tours the other players drive (line, tour; lower case).
+    /// Host only: (line, tour), lower case.
     Tours(hashbrown::HashSet<(String, String)>),
 }
 
-/// What the game keeps about a session besides the transport: the other players' buses,
-/// the chat, the sync tables and the host's world as far as it was taken over.
 #[derive(Default)]
 pub struct LanGame {
     pub remotes: hashbrown::HashMap<u32, RemoteVehicle>,
     pub chat: Chat,
-    /// The shared world: the host's traffic and people (`lan_world`).
     pub world: crate::lan_world::LanWorld,
     tables: hashbrown::HashMap<PathBuf, Arc<SyncTable>>,
-    /// The welcome whose world was taken over (`LanSession::welcomes`).
     adopted: u32,
-    /// Host: the tours the other players drive, as last told the timetable.
     tours: hashbrown::HashSet<(String, String)>,
-    /// Clock difference still to catch up (s).
     slew: f64,
     status_t: f32,
     log_t: f32,
-    /// Seconds the session has been ticked.
     clock: f32,
-    /// How far our clock was off the host's at its last clock message (s).
     last_gap: Option<f64>,
     last_sent: u64,
     last_received: u64,
-    /// The host's weather last taken over from its clock messages.
     weather_seen: Option<String>,
-    /// Vehicles another player drives that could not be made here, and when that was
-    /// tried: tried again only after a while (every frame, a server read a big add-on bus
-    /// it could not load over and over and stood still for everybody).
+    /// Retried only after a while: retrying every frame stalled a server on an unloadable bus.
     failed: hashbrown::HashMap<(u32, String), std::time::Instant>,
 }
 
-/// What the frame knows that LAN play needs.
 pub struct Frame<'a> {
     pub audio: Option<&'a omsi_audio::AudioEngine>,
-    /// Where the listener (camera) is.
     pub listener: Option<DVec3>,
-    /// The listener sits in our own bus's cabin: another player's bus is heard through our
-    /// own bodywork and glass just as an AI one is (see `SoundSet::set_muffled`).
     pub muffled: bool,
-    /// Passengers aboard our bus.
     pub riders: usize,
-    /// The game's clock (None: an offscreen client, which keeps the one it started with).
+    /// None: an offscreen client, which keeps the clock it started with.
     pub clock: Option<&'a omsi_sim::SimClock>,
-    /// The timetable tour we drive, `<line>/<tour>` (the host's timetable leaves it to us).
     pub tour: Option<String>,
-    /// We are out of the seat, walking about.
     pub walker: Option<omsi_net::Walker>,
-    /// We stand or sit in this player's bus: it is drawn from inside.
     pub inside_of: Option<u32>,
 }
 
@@ -638,7 +533,6 @@ pub(crate) fn data_dir() -> Option<PathBuf> {
     Some(PathBuf::from(home).join(".neoomsi"))
 }
 
-/// The status file of this game process.
 fn status_path() -> Option<PathBuf> {
     let id = omsi_cfg::env::var("OMSI_INSTANCE")
         .ok()
@@ -652,7 +546,6 @@ fn status_path() -> Option<PathBuf> {
     Some(data_dir()?.join("lan").join(format!("{id}.json")))
 }
 
-/// Removes the status file when the game ends.
 pub struct StatusFileGuard;
 
 impl Drop for StatusFileGuard {
@@ -668,9 +561,6 @@ fn date_of(clock: &omsi_sim::SimClock) -> String {
     format!("{:04}-{m:02}-{d:02}", clock.year)
 }
 
-/// The name the other players see: `--lan-name` (the launcher passes the driver profile's
-/// name), else the personnel file's name, else the computer account's - never a name to
-/// type in, and never the bare "Driver" everybody would share.
 pub fn player_name(args: &Args) -> String {
     let given = args.lan_name.trim();
     if !given.is_empty() && given != "Driver" {
@@ -686,7 +576,6 @@ pub fn player_name(args: &Args) -> String {
             return stem;
         }
     }
-    // the account's full name on macOS, else its login name
     #[cfg(target_os = "macos")]
     if let Ok(out) = std::process::Command::new("id").arg("-F").output() {
         let full = String::from_utf8_lossy(&out.stdout).trim().to_string();
@@ -701,7 +590,6 @@ pub fn player_name(args: &Args) -> String {
         .unwrap_or_else(|| "Driver".into())
 }
 
-/// Our world as the other side sees it.
 pub fn world_info(args: &Args) -> omsi_net::WorldInfo {
     let clock = crate::start_clock(args);
     omsi_net::WorldInfo {
@@ -713,27 +601,21 @@ pub fn world_info(args: &Args) -> omsi_net::WorldInfo {
     }
 }
 
-/// The ways into a session besides UDP (see `omsi_net::ws`): the host's WebSocket gateway
-/// and its Cloudflare tunnel, or a joining game's WebSocket to a server or a tunnel. Kept
-/// for the whole session.
 struct WsPath {
     gateway: Option<omsi_net::ws::WsGateway>,
     tunnel: Option<omsi_net::tunnel::Tunnel>,
-    /// Held for its connection's lifetime (dropping it closes the link).
+    /// Dropping it closes the link.
     _client: Option<omsi_net::ws::WsClient>,
-    /// The WebSocket address joined through (`wss://…/ws`).
     url: Option<String>,
 }
 
 static WS_PATH: std::sync::Mutex<Option<WsPath>> = std::sync::Mutex::new(None);
 
-/// Shut the gateway and the tunnel (its cloudflared process) down: at the end of the game.
 pub fn close_public_gateway() {
     let path = WS_PATH.lock().ok().and_then(|mut w| w.take());
     drop(path);
 }
 
-/// The public address the session is reached at through the tunnel (host), if it has one.
 pub fn tunnel_url() -> Option<String> {
     WS_PATH
         .lock()
@@ -747,11 +629,7 @@ pub fn tunnel_url() -> Option<String> {
         .clone()
 }
 
-/// Host: a WebSocket gateway to the session's port, and a free Cloudflare tunnel in front of
-/// it when `cloudflared` is installed, whose address goes to the rendezvous under the
-/// session's topic - the way in for a player whose router and ours cannot be punched
-/// through (the code alone found a friend across the world once, and then never again).
-/// `web_port` 0 picks the session port + 10.
+/// The tunnel is the way in for players whose router and ours cannot be hole-punched.
 pub fn open_public_gateway(
     session: &LanSession,
     info: omsi_net::ws::ServerInfo,
@@ -794,7 +672,7 @@ pub fn open_public_gateway(
     {
         return;
     }
-    // (in the background: cloudflared is fetched first when it is not installed)
+    // Threaded: cloudflared may have to be downloaded first.
     let sid = session.session;
     let gw_port = port_of_gateway();
     let _ = std::thread::Builder::new()
@@ -813,12 +691,10 @@ pub fn open_public_gateway(
                     w.tunnel = Some(t);
                 }
             }
-            // (posted when cloudflared has said the address, and again every half hour: the
-            // relay keeps it for hours, a joining game takes the latest - and counts the posts)
+            // Reposted every half hour: the relay keeps it for hours, joiners take the latest.
             let mut posted: Option<(String, Instant)> = None;
             let mut checked = Instant::now();
-            // the official server (`OMSI_OFFICIAL_KEY`: its signing key's file) says where it is
-            // reached every five minutes, for the players who type `neoomsi`
+            // `OMSI_OFFICIAL_KEY`: path to the official server's signing key.
             let official = omsi_cfg::env::var_os("OMSI_OFFICIAL_KEY").and_then(|p| {
                 std::fs::read(&p)
                     .map_err(|e| {
@@ -857,9 +733,7 @@ pub fn open_public_gateway(
                 if Arc::strong_count(&url) == 1 {
                     return;
                 }
-                // cloudflared ended (Cloudflare drops a quick tunnel now and then, the network
-                // went away): a new one, with a new address, posted again - the session stayed
-                // unreachable through the tunnel for the rest of the evening
+                // Cloudflare drops quick tunnels now and then: start a new one and repost it.
                 if checked.elapsed() > Duration::from_secs(15) {
                     checked = Instant::now();
                     let dead = WS_PATH
@@ -888,9 +762,6 @@ pub fn open_public_gateway(
         });
 }
 
-/// The buses a joining player may choose, on the gateway's status page (the launcher
-/// offers only those): `only` when a server's list says, else every bus installed here -
-/// read in the background (it takes a moment over all content folders).
 pub fn publish_vehicles(root: PathBuf, only: Vec<String>) {
     let _ = std::thread::Builder::new()
         .name("vehicle list".into())
@@ -915,7 +786,6 @@ pub fn publish_vehicles(root: PathBuf, only: Vec<String>) {
         });
 }
 
-/// The port of the WebSocket gateway this game opened.
 fn port_of_gateway() -> Option<u16> {
     WS_PATH
         .lock()
@@ -926,7 +796,6 @@ fn port_of_gateway() -> Option<u16> {
         .map(|g| g.addr.port())
 }
 
-/// A server run: what its status page says now.
 pub fn update_server_info(players: usize, time: &str, weather: &str) {
     if let Ok(w) = WS_PATH.lock() {
         if let Some(g) = w.as_ref().and_then(|w| w.gateway.as_ref()) {
@@ -941,7 +810,6 @@ pub fn update_server_info(players: usize, time: &str, weather: &str) {
     }
 }
 
-/// A server run: the players `GET /players` lists now.
 pub fn update_server_players(list: Vec<omsi_net::ws::PlayerInfo>) {
     if let Ok(w) = WS_PATH.lock() {
         if let Some(g) = w.as_ref().and_then(|w| w.gateway.as_ref()) {
@@ -952,7 +820,6 @@ pub fn update_server_players(list: Vec<omsi_net::ws::PlayerInfo>) {
     }
 }
 
-/// A server run: the admin commands that came to the web gateway's `POST /admin`.
 pub fn take_local_admin() -> Vec<String> {
     if let Ok(w) = WS_PATH.lock() {
         if let Some(g) = w.as_ref().and_then(|w| w.gateway.as_ref()) {
@@ -964,8 +831,6 @@ pub fn take_local_admin() -> Vec<String> {
     Vec::new()
 }
 
-/// Joining game: reach `url` (a server's or a host's tunnel) over a WebSocket; the local
-/// address to join instead.
 fn ws_join_target(url: &str) -> Result<String, String> {
     let c = omsi_net::ws::WsClient::connect(url)?;
     let local = c.local;
@@ -980,14 +845,11 @@ fn ws_join_target(url: &str) -> Result<String, String> {
     Ok(local.to_string())
 }
 
-/// Host or join as the command line says (`--lan-host`, `--lan-join`). A session that
-/// cannot be started is reported and the game runs on alone. A joining player waits
-/// briefly for the host's welcome, so that its map is loaded with the host's world.
+/// A joiner waits for the host's welcome so its map is loaded with the host's world.
 pub fn start(args: &Args) -> Option<LanSession> {
     let world = world_info(args);
     let session = match (&args.lan_host, &args.lan_join) {
         (Some(port), _) => {
-            // 0 = the default port, or the next free one when another session runs here
             let (p, try_next) = if *port == 0 {
                 (omsi_net::DEFAULT_PORT, true)
             } else {
@@ -1003,7 +865,6 @@ pub fn start(args: &Args) -> Option<LanSession> {
             }
         }
         (None, Some(target)) => {
-            // a server's address (https://…, a trycloudflare name): over a WebSocket
             let direct = match omsi_net::ws::ws_url(target) {
                 Some(url) => match ws_join_target(&url) {
                     Ok(local) => local,
@@ -1052,7 +913,6 @@ pub fn start(args: &Args) -> Option<LanSession> {
         }
     }
     if session.role == Role::Client {
-        // the hello names the bus we are about to drive (the state says when it stands)
         let planned = Pose {
             bus: args.bus.clone().unwrap_or_default().replace('\\', "/"),
             ..Default::default()
@@ -1062,7 +922,6 @@ pub fn start(args: &Args) -> Option<LanSession> {
             session.tick(0.02, &planned);
             std::thread::sleep(Duration::from_millis(20));
         }
-        // nobody answered at the addresses of the code: the host's tunnel, if it posted one
         if session.welcome.is_none()
             && session.rejected.is_none()
             && args
@@ -1113,7 +972,6 @@ pub fn start(args: &Args) -> Option<LanSession> {
         }
     }
     if session.role == Role::Host && args.server.is_none() {
-        // the way in over the internet that always works (see `open_public_gateway`)
         let info = omsi_net::ws::ServerInfo {
             name: format!("{}'s game", player_name(args)),
             map: args.map.clone(),
@@ -1128,9 +986,6 @@ pub fn start(args: &Args) -> Option<LanSession> {
     Some(session)
 }
 
-/// The host's mods (see `lan_mods`): the host serves them on its session's port number
-/// (TCP), a joining player fetches what it lacks before its world is made, and says how
-/// far it has got in the status the launcher shows.
 pub fn share_mods(args: &mut Args, lan: &mut LanSession) {
     match lan.role {
         Role::Host => {
@@ -1150,8 +1005,8 @@ pub fn share_mods(args: &mut Args, lan: &mut LanSession) {
             };
             note(lan, "Host's mods: looking what is needed…".into());
             let session = lan.session;
-            // the host's TCP port is not always reachable (a router forwards the UDP session
-            // only, or we came in over a WebSocket): the files go through its tunnel then
+            // the host's TCP port may be unreachable (UDP-only forward, or joined over a
+            // WebSocket): the files go through its tunnel then
             let joined_url = WS_PATH
                 .lock()
                 .ok()
@@ -1178,8 +1033,8 @@ pub fn share_mods(args: &mut Args, lan: &mut LanSession) {
                     }
                 }
             }
-            // (in the background: the session is kept alive meanwhile - a join held for
-            // minutes was dropped by the host and came in later without the mods)
+            // in the background with the session kept alive: a join held for minutes was
+            // dropped by the host and came back without the mods
             let (tx, rx) = std::sync::mpsc::channel::<String>();
             let mut fargs = args.clone();
             let worker = std::thread::spawn(move || {
@@ -1238,10 +1093,8 @@ pub fn share_mods(args: &mut Args, lan: &mut LanSession) {
     }
 }
 
-/// Do `work` (loading a world, which may take minutes on a big map) while the session is
-/// kept on another thread: a host answers the players who join meanwhile, a joining game
-/// tells its host that it is still there. A dedicated server loads the whole map before its
-/// first frame, and nobody could join it until it was done.
+/// Loading a big map takes minutes; without the session kept alive meanwhile nobody can
+/// join a host, and a joining game is dropped by its host.
 pub fn answering_while<T>(
     lan: &mut Option<LanSession>,
     bus: Option<&str>,
@@ -1274,11 +1127,8 @@ pub fn answering_while<T>(
     })
 }
 
-/// A joining player plays on the host's map when it is installed here, whatever map was
-/// chosen before joining. The host's list of mods also brings it, but that list may not
-/// come in time: listing a big add-on map (thousands of objects to find and hash) took the
-/// host longer than the joining game waited, and the player was left on its own map, where
-/// nobody ever met them.
+/// Not left to the host's mod list: listing a big add-on map can outlast the joiner's
+/// wait, leaving the player alone on its own map.
 pub fn take_host_map(args: &mut Args, lan: &mut LanSession) {
     if lan.role != Role::Client {
         return;
@@ -1290,9 +1140,8 @@ pub fn take_host_map(args: &mut Args, lan: &mut LanSession) {
     else {
         return;
     };
-    // (the same map, however its path was written: from its `maps/` folder on - a map
-    // chosen as a whole path, or out of an archive, is still the host's one, and taking it
-    // for another map dropped the line and tour chosen: everybody drove without a duty)
+    // compared from `maps/` on: a whole path or an archive path is still the host's map,
+    // and mistaking it for another map dropped the chosen line and tour
     let norm = |s: &str| {
         let s = s.trim().replace('\\', "/").to_ascii_lowercase();
         match s.rfind("maps/") {
@@ -1313,7 +1162,7 @@ pub fn take_host_map(args: &mut Args, lan: &mut LanSession) {
                 args.map
             );
             args.map = theirs;
-            // (the entry point, depot file and tour chosen were those of the other map)
+            // the entry point, depot file and tour chosen belonged to the other map
             args.entry = 0;
             args.spawn = None;
             args.hof = None;
@@ -1335,7 +1184,6 @@ pub fn take_host_map(args: &mut Args, lan: &mut LanSession) {
     }
 }
 
-/// A date `YYYY-MM-DD` as (year, day of year).
 fn parse_date(s: &str) -> Option<(i32, i32)> {
     let v: Vec<i32> = s.split('-').filter_map(|x| x.trim().parse().ok()).collect();
     (v.len() == 3).then(|| {
@@ -1345,7 +1193,6 @@ fn parse_date(s: &str) -> Option<(i32, i32)> {
     })
 }
 
-/// The host's clock as a `SimClock` now (its date moved on past midnight).
 fn host_clock_now(h: &omsi_net::HostClock) -> Option<omsi_sim::SimClock> {
     let (year, day_of_year) = parse_date(&h.world.date)?;
     let mut c = omsi_sim::SimClock {
@@ -1358,7 +1205,6 @@ fn host_clock_now(h: &omsi_net::HostClock) -> Option<omsi_sim::SimClock> {
     Some(c)
 }
 
-/// The host's time of day now as `HH:MM:SS` (a joining player's duty is placed with it).
 pub fn host_time_now(lan: &LanSession) -> Option<String> {
     let w = lan.welcome.as_ref()?;
     let c = host_clock_now(&omsi_net::HostClock {
@@ -1370,7 +1216,6 @@ pub fn host_time_now(lan: &LanSession) -> Option<String> {
     Some(format!("{:02}:{:02}:{:02}", t / 3600, t / 60 % 60, t % 60))
 }
 
-/// A weather file the host uses, if this machine has it (None: the map's default).
 fn host_weather(args: &Args, weather: &str) -> Result<Option<String>, String> {
     let w = weather.trim();
     if w.is_empty() {
@@ -1379,7 +1224,6 @@ fn host_weather(args: &Args, weather: &str) -> Result<Option<String>, String> {
     if crate::weather_setup::custom_weather(Some(w)).is_some() {
         return Ok(Some(w.to_string()));
     }
-    // a METAR report's values: made into a weather here, no file and no sync of our own
     if w.starts_with(crate::weather_setup::REPORT) {
         return if crate::weather_setup::from_report(w).is_some() {
             Ok(Some(w.to_string()))
@@ -1396,9 +1240,6 @@ fn host_weather(args: &Args, weather: &str) -> Result<Option<String>, String> {
     }
 }
 
-/// Take the host's world (a joining player, before the map is loaded): the date, the time
-/// of day as the host's clock has it now, the weather and the season go into the
-/// arguments the world is made from. The map stays ours (a different one is warned about).
 pub fn adopt_host_world(args: &mut Args, lan: &mut LanSession, game: &mut LanGame) {
     if lan.role != Role::Client {
         return;
@@ -1435,7 +1276,6 @@ pub fn adopt_host_world(args: &mut Args, lan: &mut LanSession, game: &mut LanGam
     );
     let mut mine = world_info(args);
     if warnings.is_empty() {
-        // compared as the host spelled it
         mine.weather = hw.weather.clone();
     }
     lan.set_world(mine);
@@ -1445,8 +1285,6 @@ pub fn adopt_host_world(args: &mut Args, lan: &mut LanSession, game: &mut LanGam
     }
 }
 
-/// The host's world after the map was loaded (a late welcome, a reconnect): the clock is
-/// set and the weather changed; the season needs the map loaded again, which is said.
 fn adopt_at_runtime(
     args: &Args,
     lan: &mut LanSession,
@@ -1498,7 +1336,7 @@ fn adopt_at_runtime(
         }
         Err(e) => warnings.push(e),
     }
-    // the season is in the textures that are loaded: say so when the host's differs
+    // the season is baked into the loaded textures, so a differing one is only warned about
     if let Some(world) = world {
         let mut theirs = args.clone();
         theirs.date = Some(hw.date.clone());
@@ -1524,7 +1362,6 @@ fn adopt_at_runtime(
     out
 }
 
-/// Days since 1 January of year 0 (for comparing two dates).
 fn day_number(year: i32, day_of_year: i32) -> i64 {
     let y = year as i64 - 1;
     let before = if year > 0 {
@@ -1535,7 +1372,7 @@ fn day_number(year: i32, day_of_year: i32) -> i64 {
     before + day_of_year as i64
 }
 
-/// How far our clock is behind the host's (s, negative: ahead).
+/// Seconds our clock is behind the host's (negative: ahead).
 fn clock_gap(host: &omsi_sim::SimClock, mine: &omsi_sim::SimClock) -> f64 {
     (day_number(host.year, host.day_of_year) - day_number(mine.year, mine.day_of_year)) as f64
         * 86400.0
@@ -1557,8 +1394,7 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
-/// The addresses other players may join this host at, best first: (what network it is,
-/// `ip:port`, kind key) - a VPN's ("Hamachi 25.34.223.28:27015") before the LAN's.
+/// Best first, a VPN's before the LAN's: (label, `ip:port`, kind key).
 pub fn host_addresses(port: u16) -> Vec<(&'static str, String, &'static str)> {
     omsi_net::addrs::joinable_addresses()
         .into_iter()
@@ -1566,8 +1402,6 @@ pub fn host_addresses(port: u16) -> Vec<(&'static str, String, &'static str)> {
         .collect()
 }
 
-/// Write the status file the launcher reads (written atomically: a new file renamed over
-/// the old one).
 fn write_status(lan: &LanSession, game: &LanGame, player: Option<&Player>) {
     let Some(p) = status_path() else { return };
     let players: Vec<serde_json::Value> = lan
@@ -1598,8 +1432,7 @@ fn write_status(lan: &LanSession, game: &LanGame, player: Option<&Player>) {
         "chat": game.chat.lines.iter().rev().take(CHAT_LINES).rev().cloned().collect::<Vec<_>>(),
         "updated": now_secs(),
     });
-    // (the disk is written on a thread of its own: a slow disk or a virus scanner held the
-    // frame every two seconds)
+    // on its own thread: a slow disk or a virus scanner stalled the frame every two seconds
     static WRITER: std::sync::OnceLock<Option<std::sync::mpsc::Sender<(PathBuf, Vec<u8>)>>> =
         std::sync::OnceLock::new();
     let writer = WRITER.get_or_init(|| {
@@ -1608,7 +1441,6 @@ fn write_status(lan: &LanSession, game: &LanGame, player: Option<&Player>) {
             .name("lan status".into())
             .spawn(move || {
                 while let Ok(mut job) = rx.recv() {
-                    // only the newest of a backlog is worth writing
                     while let Ok(newer) = rx.try_recv() {
                         job = newer;
                     }
@@ -1630,7 +1462,6 @@ fn write_status(lan: &LanSession, game: &LanGame, player: Option<&Player>) {
     }
 }
 
-/// "35 m ahead", "1.2 km behind", "12 m to the left" - where `pose` is seen from our bus.
 fn relative_position(me: &omsi_sim::VehicleInstance, pose: &Pose) -> String {
     let d = DVec3::new(pose.x, pose.y, pose.z) - me.position;
     let dist = d.truncate().length();
@@ -1650,9 +1481,7 @@ fn relative_position(me: &omsi_sim::VehicleInstance, pose: &Pose) -> String {
     }
 }
 
-/// The other players' name tags, as ETS2 has them: the name over the bus's roof and a
-/// small line under it (line and destination, how far away), fading out beyond 300 m.
-/// Screen positions in physical pixels of a `width` x `height` picture.
+/// Screen positions are in physical pixels of a `width` x `height` picture.
 pub fn name_tags(
     game: &LanGame,
     cam: &omsi_render::Camera,
@@ -1663,14 +1492,12 @@ pub fn name_tags(
     let mut tags = Vec::new();
     for r in game.remotes.values() {
         let v = &r.vehicle;
-        // the roof: the bounding box's top when the bus says, else a bus's height
         let top =
             v.ty.def
                 .bounding_box
                 .map(|b| (b[5] + b[2] * 0.5) as f64)
                 .filter(|t| *t > 1.0)
                 .unwrap_or(3.4);
-        // (a player out of the seat: the name over their head, none over the bus)
         let p = match r.last.walker {
             Some(w) => DVec3::new(w.x, w.y, w.z + 2.15),
             None => v.position + DVec3::new(0.0, 0.0, top + 0.6),
@@ -1725,8 +1552,6 @@ pub fn name_tags(
     tags
 }
 
-/// A vehicle file as the other players' games find it: relative to whichever content root
-/// holds it (the original installation or the mods folder).
 fn content_relative(path: &Path, root: &Path) -> String {
     let mut roots = omsi_cfg::content_roots();
     roots.push(root.to_path_buf());
@@ -1738,9 +1563,7 @@ fn content_relative(path: &Path, root: &Path) -> String {
     String::new()
 }
 
-/// The paint scheme `--paint` picked, by name.
 pub fn paint_name(args: &Args, ty: &omsi_sim::VehicleType) -> String {
-    // (none chosen: the model's own textures, sent as no name)
     let Some(p) = args.paint.as_deref() else {
         return String::new();
     };
@@ -1756,7 +1579,6 @@ pub fn paint_name(args: &Args, ty: &omsi_sim::VehicleType) -> String {
         .unwrap_or_default()
 }
 
-/// The box of a vehicle: centre, heading, length, width.
 pub fn footprint_of(v: &omsi_sim::VehicleInstance, fallback: [f32; 6]) -> Footprint {
     let bb = v.ty.def.bounding_box.unwrap_or(fallback);
     let h = v.heading.to_radians();
@@ -1767,7 +1589,6 @@ pub fn footprint_of(v: &omsi_sim::VehicleInstance, fallback: [f32; 6]) -> Footpr
             -cx * h.sin() + cy * h.cos(),
             0.0,
         );
-    // an articulated bus reaches back over its rear sections
     let mut length = bb[1];
     let mut centre = c;
     for t in &v.trailers {
@@ -1791,7 +1612,6 @@ pub fn footprint_of(v: &omsi_sim::VehicleInstance, fallback: [f32; 6]) -> Footpr
 const BUS_BOX: [f32; 6] = [2.5, 11.5, 3.0, 0.0, 0.0, 1.5];
 const CAR_BOX: [f32; 6] = [2.0, 4.5, 1.6, 0.0, 0.0, 0.8];
 
-/// Line and destination as our bus shows them: the duty's, or what the IBIS was set to.
 fn line_and_destination(p: &Player, duty: Option<(&str, &str)>) -> (String, String) {
     if let Some((l, d)) = duty {
         return (l.to_string(), d.to_string());
@@ -1820,7 +1640,6 @@ fn line_and_destination(p: &Player, duty: Option<(&str, &str)>) -> (String, Stri
     (line, dest.trim().to_string())
 }
 
-/// What we send about our own bus.
 pub fn my_pose(
     game: &mut LanGame,
     p: Option<&Player>,
@@ -1871,17 +1690,15 @@ pub fn my_pose(
         || on("lights_main")
         || v.var("Spot_Select").is_some_and(|s| s >= 0.0)
     {
-        // (a mod bus names its lamps its own way; its selected spotlight is the dipped
-        // beam every script sets for the renderer - without it the others saw such a bus
-        // drive through the night with its headlights off)
+        // mod buses name their lamps their own way; the selected spotlight is the dipped
+        // beam every script sets for the renderer
         2
     } else if on("lights_stand") {
         1
     } else {
         0
     };
-    // the indicator switch where the script has one (0 off, 1 left, 2 right, 3 hazard),
-    // else the lamps, remembered across their dark phase
+    // 0 off, 1 left, 2 right, 3 hazard: the script's switch if it has one, else the lamps
     let blinker = if on("lights_sw_warnblinker") {
         3
     } else {
@@ -1902,6 +1719,13 @@ pub fn my_pose(
     let (line, destination) = line_and_destination(p, duty);
     let texts = display_texts(v);
     let freetex = freetex_values(v);
+    let (hof, ibis) = match v.host.hof.as_deref() {
+        Some(h) => (
+            hof_key(h),
+            table.ibis.iter().map(|id| id.map(get)).collect(),
+        ),
+        None => (0, Vec::new()),
+    };
     Pose {
         id: 0,
         name: String::new(),
@@ -1912,6 +1736,8 @@ pub fn my_pose(
         tour: String::new(),
         texts,
         freetex,
+        hof,
+        ibis,
         figure: p
             .driver
             .as_ref()
@@ -1962,9 +1788,7 @@ pub fn my_pose(
     }
 }
 
-/// The string variables the vehicle's `[texttexture]` displays show: the model's, in its
-/// order, then those of its rear sections' displays that the model has not (a side
-/// destination sign on an articulated bus's rear section stood blank for the others).
+/// Includes rear sections' display variables the model lacks, else their signs stay blank.
 fn display_vars(v: &omsi_sim::VehicleInstance) -> Vec<String> {
     let mut names: Vec<String> = Vec::new();
     let models = std::iter::once(&v.ty.model).chain(v.trailers.iter().map(|t| &t.ty.model));
@@ -1978,7 +1802,6 @@ fn display_vars(v: &omsi_sim::VehicleInstance) -> Vec<String> {
     names
 }
 
-/// The strings the vehicle's `[texttexture]` displays show (see [`display_vars`]).
 fn display_texts(v: &omsi_sim::VehicleInstance) -> Vec<String> {
     display_vars(v)
         .iter()
@@ -1992,9 +1815,7 @@ fn display_texts(v: &omsi_sim::VehicleInstance) -> Vec<String> {
         .collect()
 }
 
-/// The `[matl_freetex]` string variables of a vehicle type, sorted by name (both games
-/// agree on the order): the picture a slot shows is the file one of them names - a roller
-/// blind's number, a sign. Worked out by the sender's scripts alone.
+/// Sorted by name: both games must agree on the order on the wire.
 fn freetex_names(ty: &omsi_sim::VehicleType) -> Vec<String> {
     let mut names: Vec<String> = ty
         .model
@@ -2013,7 +1834,6 @@ fn freetex_names(ty: &omsi_sim::VehicleType) -> Vec<String> {
     names
 }
 
-/// What the vehicle's `[matl_freetex]` variables hold now (see [`freetex_names`]).
 fn freetex_values(v: &omsi_sim::VehicleInstance) -> Vec<String> {
     freetex_names(&v.ty)
         .iter()
@@ -2027,8 +1847,7 @@ fn freetex_values(v: &omsi_sim::VehicleInstance) -> Vec<String> {
         .collect()
 }
 
-/// Show another player's `[matl_freetex]` pictures on their bus here: their copy's scripts
-/// do not run the roller blind, which stood empty (the line number never showed).
+/// The remote copy's scripts don't drive the roller blind, so it would stay blank.
 fn show_freetex(v: &mut omsi_sim::VehicleInstance, values: &[String]) {
     if values.is_empty() {
         return;
@@ -2044,7 +1863,6 @@ fn show_freetex(v: &mut omsi_sim::VehicleInstance, values: &[String]) {
     }
 }
 
-/// Show another player's display texts on their bus here (same files, same order).
 fn show_display_texts(v: &mut omsi_sim::VehicleInstance, texts: &[String]) {
     if texts.is_empty() {
         return;
@@ -2060,7 +1878,6 @@ fn show_display_texts(v: &mut omsi_sim::VehicleInstance, texts: &[String]) {
     }
 }
 
-/// The host's own vehicles for its lists: its bus and the AI traffic around.
 fn host_footprints(
     p: Option<&Player>,
     traffic: Option<&crate::traffic::Traffic>,
@@ -2075,7 +1892,6 @@ fn host_footprints(
     out
 }
 
-/// A box for the overlap test, grown by the gaps we want to keep.
 fn obb(f: &Footprint, grow: bool) -> omsi_sim::collision::Obb {
     let (ga, gc) = if grow {
         (GAP_ALONG * 0.5, GAP_ACROSS * 0.5)
@@ -2103,8 +1919,6 @@ fn blocked(me: &Footprint, occupied: &[Footprint]) -> bool {
     })
 }
 
-/// A point `d` metres along the lanes from (`lane`, `s`), following the links (or the
-/// straight continuation where there are none), with the heading there.
 fn along(lanes: &[Lane], prev: &[Vec<usize>], lane: usize, s: f32, d: f32) -> Option<(DVec3, f32)> {
     let mut li = lane;
     let mut s = s + d;
@@ -2168,10 +1982,7 @@ fn heading_gap(a: f32, b: f32) -> f32 {
     ((a - b + 540.0).rem_euclid(360.0) - 180.0).abs()
 }
 
-/// Move our bus off anything standing where it spawned: along the road it stands on, the
-/// nearest free place behind or in front of the others (behind first at equal distance),
-/// or - off the road - along its own heading and then in rows beside it. Returns the
-/// distance moved (0 when the spawn was free, None when no free place was found).
+/// Returns the distance moved: 0 if the spawn was free, None if no free place was found.
 pub fn clear_spawn(
     p: &mut Player,
     occupied: &[Footprint],
@@ -2188,7 +1999,6 @@ pub fn clear_spawn(
         );
         return Some(0.0);
     }
-    // the origin sits this far from the box centre (along, across)
     let v = &p.vehicle;
     let h0 = v.heading.to_radians();
     let dc = DVec3::new(me.x, me.y, me.z) - v.position;
@@ -2225,7 +2035,6 @@ pub fn clear_spawn(
             z,
         ))
     };
-    // the lanes: the traffic network (linked), or the world's own list
     let world_lanes;
     let (lanes, prev): (&[Lane], &[Vec<usize>]) = match net {
         Some(n) if !n.lanes.is_empty() => (&n.lanes, &n.prev),
@@ -2240,7 +2049,6 @@ pub fn clear_spawn(
         if l.kind != LaneKind::Street || l.points.len() < 2 {
             continue;
         }
-        // a lane cannot reach further from its start than its own length
         if (l.points[0] - centre).truncate().length() > l.length() as f64 + 10.0 {
             continue;
         }
@@ -2249,7 +2057,6 @@ pub fn clear_spawn(
                 continue;
             }
             let same_way = heading_gap(l.at(s).1, v.heading as f32) < 60.0;
-            // a lane running our way beats a closer one running the other way
             let score = d + if same_way { 0.0 } else { 4.0 };
             if best_lane.map(|b| score < b.2).unwrap_or(true) {
                 best_lane = Some((i, s, score, same_way));
@@ -2257,13 +2064,11 @@ pub fn clear_spawn(
         }
     }
     let mut placed: Option<(DVec3, f64, f64)> = None;
-    // the lane and the place on it where the bus went (for its rear sections)
     let mut on_lane: Option<(usize, f32, f32)> = None;
     if let Some((li, s, _, same_way)) = best_lane {
         let sign = if same_way { 1.0 } else { -1.0 };
-        // how much the road turns under the whole bus there: a straight box on a bend
-        // stands with its ends off the road (an articulated bus with its rear section on
-        // the verge), so a straight stretch a little further off is taken first
+        // A straight box on a bend leaves its ends (or rear section) off the road, so prefer
+        // a straight stretch a little further away.
         let reach = me.length * 0.5 + 1.0;
         let bend = |c: f32| -> f32 {
             match (
@@ -2297,7 +2102,6 @@ pub fn clear_spawn(
                     }
                 }
             }
-            // a bend-free place more than 60 m away: the nearest free one on the bend
             if d > 60.0 && fallback.is_some() {
                 break;
             }
@@ -2310,7 +2114,6 @@ pub fn clear_spawn(
         }
     }
     if placed.is_none() {
-        // off the road (a depot yard): along our heading, then rows beside it
         let (fwd, right) = (
             DVec3::new(h0.sin(), h0.cos(), 0.0),
             DVec3::new(h0.cos(), -h0.sin(), 0.0),
@@ -2345,8 +2148,7 @@ pub fn clear_spawn(
     for t in p.vehicle.trailers.iter_mut() {
         t.realign();
     }
-    // on the road: every rear section's turning axle on the lane behind its coupling, so
-    // that it follows the bend instead of standing straight out onto the verge
+    // Put the rear section's axle on the lane so it follows the bend, not the verge.
     if let (Some((li, s, at)), true) = (on_lane, !p.vehicle.trailers.is_empty()) {
         let back = if heading_gap(lanes[li].at(s).1, heading as f32) < 90.0 {
             -1.0
@@ -2355,11 +2157,10 @@ pub fn clear_spawn(
         };
         let (lead_pos, lead_rot) = (p.vehicle.position, p.vehicle.body_rotation());
         let fwd = DVec3::new(heading.to_radians().sin(), heading.to_radians().cos(), 0.0);
-        // (the first rear section; a second one lines up behind it as it moves)
+        // Only the first: later sections line up behind it as it moves.
         if let Some(t) = p.vehicle.trailers.first_mut() {
             let c = t.coupling_point(lead_pos, lead_rot);
             let len = t.pivot_length() as f64;
-            // walk back along the lane until the axle is the part's length from the coupling
             let mut k = 0.0f32;
             while k < 60.0 {
                 if let Some((q, _)) = along(lanes, prev, li, s, at + back * k) {
@@ -2395,11 +2196,8 @@ pub fn clear_spawn(
     Some(moved)
 }
 
-/// A joining player's game, right after its bus was put at the entry point: ask the host
-/// what stands there, wait briefly for the answer and move the bus clear.
-/// Ask the host what stands at our spawn and wait up to `wait` for the answer (the window
-/// waits for none: the frame loop moves the bus when the list comes, see `frame`; an
-/// offscreen run has no frames to spare and waits).
+/// With a zero `wait` the frame loop moves the bus once the host answers (see `frame`);
+/// offscreen runs have no frames to spare and wait here.
 pub fn settle_spawn(
     lan: &mut LanSession,
     game: &mut LanGame,
@@ -2438,17 +2236,15 @@ pub fn settle_spawn(
     }
 }
 
-/// The vehicle file a remote pose names, on this machine. The path comes off the network:
-/// it must be a plain relative `.bus` / `.ovh` path (`omsi_net::vehicle_path`), found under
-/// one of our content roots, and a regular file of a sane size - never a device such as
-/// `/dev/zero`, never a file elsewhere on the disk.
+/// The path comes off the network: only a relative `.bus`/`.ovh` path inside a content
+/// root, and a regular file of sane size (never a device such as `/dev/zero`).
 fn remote_bus_file(args: &Args, bus: &str) -> Result<PathBuf, String> {
     let rel = omsi_net::vehicle_path(bus)
         .ok_or_else(|| "not a vehicle file inside a content folder".to_string())?;
     let mut path = omsi_cfg::resolve_path(&args.root, &rel);
     if !omsi_cfg::vfs::is_file(&path) {
-        // the other side's own place for it ("Archives/<pack>.zip/Vehicles/…", a content
-        // folder of its own): the same vehicle under any content root of ours
+        // The sender may keep it elsewhere (an archive, its own content folder): look up the
+        // `vehicles/...` tail under our content roots.
         let lower = rel.to_ascii_lowercase().replace('\\', "/");
         if let Some(k) = lower.find("vehicles/") {
             if let Some((_, p)) = omsi_cfg::find_in_roots(&rel.replace('\\', "/")[k..]) {
@@ -2471,9 +2267,7 @@ fn remote_bus_file(args: &Args, bus: &str) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-/// Load the type a remote player drives, or a stand-in: ours, or on a server the first of
-/// the buses its `vehicles` list allows. A bus the list does not allow is not loaded at all
-/// (a player joining with another than the server offers).
+/// The bool is true for a stand-in (ours, or the server's first allowed bus).
 fn remote_type(
     args: &Args,
     pose: &Pose,
@@ -2552,7 +2346,6 @@ fn new_remote(
     }
     vehicle.apply_paint_vars(scheme);
     let render = world.add_vehicle_shared(r, scene, &ty, scheme, None);
-    // the coupled sections of an articulated bus
     let mut trailer_renders = Vec::new();
     let mut lead = ty.clone();
     let mut lead_rev = false;
@@ -2580,7 +2373,7 @@ fn new_remote(
             }
         }
     }
-    // (with its rear sections: theirs are in the table too)
+    // After attaching the rear sections: their variables are part of the table.
     let table = sync_table(game, &vehicle);
     vehicle.position = DVec3::new(pose.x, pose.y, pose.z);
     vehicle.heading = pose.heading as f64;
@@ -2645,18 +2438,28 @@ fn new_remote(
     })
 }
 
-/// Seconds on our clock (for comparing with the others' `sent_ms`).
 fn lan_now() -> f64 {
     static T0: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
     T0.get_or_init(Instant::now).elapsed().as_secs_f64()
 }
 
-/// How far in the past the others' buses are drawn (s): two states at 20 a second, and
-/// room for one late one.
 const INTERP_DELAY: f64 = 0.12;
 
 impl RemoteVehicle {
-    /// Take in the states that came (with when they arrived).
+    /// Only when both games draw from the same depot file; otherwise the line and
+    /// destination are looked up by name.
+    fn ibis_pins(&self, pose: &Pose) -> Vec<(VarId, f32)> {
+        if self.stand_in || pose.hof == 0 || self.hof.as_deref().map(hof_key) != Some(pose.hof) {
+            return Vec::new();
+        }
+        self.table
+            .ibis
+            .iter()
+            .zip(&pose.ibis)
+            .filter_map(|(id, v)| Some(((*id)?, (*v)?)))
+            .collect()
+    }
+
     fn take_samples(&mut self, history: &std::collections::VecDeque<(Instant, Pose)>) {
         let now_i = Instant::now();
         let now = lan_now();
@@ -2666,7 +2469,6 @@ impl RemoteVehicle {
             }
             let sent = p.sent_ms as f64 / 1000.0;
             if self.samples.back().map(|b| sent <= b.0).unwrap_or(false) {
-                // (their game started again: its clock began anew)
                 if self
                     .samples
                     .back()
@@ -2682,8 +2484,7 @@ impl RemoteVehicle {
             }
             let arrived = now - now_i.saturating_duration_since(*at).as_secs_f64();
             let o = arrived - sent;
-            // the quickest way over the network sets the offset; it may creep up slowly
-            // (clocks drift, the way changes)
+            // The fastest delivery sets the offset; it may creep up slowly as clocks drift.
             self.offset = Some(match self.offset {
                 Some(off) if o >= off => off + (o - off) * 0.01,
                 _ => o,
@@ -2695,20 +2496,15 @@ impl RemoteVehicle {
         }
     }
 
-    /// Their state as it was `INTERP_DELAY` ago: between the two states around that moment,
-    /// or carried on from the last one along its way for a short while. None without
-    /// stamped states (an older game).
     fn interpolated(&mut self) -> Option<Pose> {
-        // (`OMSI_NO_INTERP=1`: the old way, for comparing)
         static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         if *OFF.get_or_init(|| omsi_cfg::env::var_os("OMSI_NO_INTERP").is_some()) {
             return None;
         }
         let off = self.offset?;
         let (last_t, last) = self.samples.back()?;
-        // as far back as two of their recent states apart: a bus that stood still is sent
-        // five times a second, and 0.12 s behind the newest state lay past it - the doors,
-        // the wheels and the walker waited for each state and then jumped to it
+        // Stay two send intervals behind: a parked bus is sent at only 5 Hz, and a fixed
+        // 0.12 s ran past the newest state so doors and wheels jumped.
         let n = self.samples.len();
         let gap = if n >= 2 {
             self.samples
@@ -2720,9 +2516,8 @@ impl RemoteVehicle {
         } else {
             0.05
         };
-        // (the moment drawn follows that smoothly: set anew each frame, it went back a
-        // few hundredths of a second whenever one of their frames had taken long, and on
-        // again when that one was no longer among the last four - the bus jumped)
+        // Smoothed: recomputed per frame, the playback time stepped back after one slow
+        // frame of theirs and the bus jumped.
         let now = lan_now();
         let t = self.play.step(
             now,
@@ -2734,7 +2529,6 @@ impl RemoteVehicle {
             return self.samples.front().map(|x| x.1.clone());
         };
         if k + 1 >= self.samples.len() {
-            // past the newest: along its heading at its speed, for at most a third of a second
             let ahead = (t - last_t).clamp(0.0, 0.3);
             let mut p = last.clone();
             let h = (p.heading as f64).to_radians();
@@ -2745,8 +2539,7 @@ impl RemoteVehicle {
                 r.x += h.sin() * d;
                 r.y += h.cos() * d;
             }
-            // the walker on foot goes on its own way (held back, it stood still and jumped
-            // on with every state, and the planted feet were torn along behind)
+            // Extrapolate the walker too: held back, it stalls, jumps each state, drags its feet.
             if let Some(w) = p
                 .walker
                 .as_mut()
@@ -2770,7 +2563,6 @@ impl RemoteVehicle {
         } else {
             1.0
         };
-        // a jump (placed elsewhere): no gliding across it
         if ((b.x - a.x).powi(2) + (b.y - a.y).powi(2)).sqrt() > 40.0 {
             return Some(if f < 0.5 { a.clone() } else { b.clone() });
         }
@@ -2833,7 +2625,6 @@ fn lerp_angle(a: f64, b: f64, t: f64) -> f64 {
     (a + d * t).rem_euclid(360.0)
 }
 
-/// A remote vehicle has gone: its sounds stop and its instances go back to the world.
 fn release(
     r: &Renderer,
     scene: &mut Scene,
@@ -2860,7 +2651,6 @@ fn ease_heading(from: f64, to: f64, k: f64) -> f64 {
     if dh.abs() > 90.0 { to } else { from + dh * k }
 }
 
-/// `cur` glides towards `want` (same length afterwards).
 fn glide(cur: &mut Vec<f32>, want: &[f32], k: f32) {
     if cur.len() != want.len() {
         *cur = want.to_vec();
@@ -2871,17 +2661,12 @@ fn glide(cur: &mut Vec<f32>, want: &[f32], k: f32) {
     }
 }
 
-/// One frame of another player's bus: the pose glides towards the latest state, the AI
-/// scripts run with that state as their inputs, the table's variables are pinned to the
-/// sender's values, and the horn is pressed and let go as theirs is.
 fn drive_remote(rv: &mut RemoteVehicle, pose: &Pose, dt: f32, exact: bool) {
     rv.name = pose.name.clone();
     rv.vehicle.pitch = pose.pitch;
     rv.vehicle.bank = pose.bank;
     rv.odometer += pose.speed_kmh / 3.6 * dt;
     if exact {
-        // interpolated between their states (`RemoteVehicle::interpolated`): where it is
-        // drawn is where it is, the doors and the moving parts as they were then
         rv.vehicle.position = DVec3::new(pose.x, pose.y, pose.z);
         rv.vehicle.heading = pose.heading as f64;
         rv.target = (rv.vehicle.position, rv.vehicle.heading);
@@ -2900,9 +2685,7 @@ fn drive_remote(rv: &mut RemoteVehicle, pose: &Pose, dt: f32, exact: bool) {
         rv.suspension = pose.suspension.clone();
         rv.values = pose.values.clone();
     } else {
-        // (an older game's states carry no clock:) where the bus is now, not where it was
-        // when the pose left the other game: carried on along its heading at its speed for
-        // the time since the pose came, plus the way over the network
+        // Older games send no timestamps: extrapolate by the pose's age plus ~40 ms latency.
         let at = DVec3::new(pose.x, pose.y, pose.z);
         if at != rv.pose_seen.0 {
             rv.pose_seen = (at, Instant::now());
@@ -2911,16 +2694,13 @@ fn drive_remote(rv: &mut RemoteVehicle, pose: &Pose, dt: f32, exact: bool) {
         let h = (pose.heading as f64).to_radians();
         let ahead = DVec3::new(h.sin(), h.cos(), 0.0) * (pose.speed_kmh as f64 / 3.6) * age;
         rv.target = (at + ahead, pose.heading as f64);
-        // glide towards it: twenty updates a second, drawn at frame rate
         let k = (dt * 20.0).min(1.0);
         let kd = k as f64;
         let d = rv.target.0 - rv.vehicle.position;
         rv.vehicle.position += if d.length() > 25.0 { d } else { d * kd };
         rv.vehicle.heading = ease_heading(rv.vehicle.heading, rv.target.1, kd);
-        // the rear sections where the other game has them
         rv.rear.resize(pose.rear.len(), (DVec3::ZERO, 0.0));
         for (i, (cur, q)) in rv.rear.iter_mut().zip(pose.rear.iter()).enumerate() {
-            // (carried on with the bus: a rear section follows the same way)
             let tgt = (DVec3::new(q.x, q.y, q.z) + ahead, q.heading as f64);
             let jump = cur.0 == DVec3::ZERO || (tgt.0 - cur.0).length() > 25.0;
             cur.0 = if jump {
@@ -2941,14 +2721,13 @@ fn drive_remote(rv: &mut RemoteVehicle, pose: &Pose, dt: f32, exact: bool) {
         glide(&mut rv.suspension, &pose.suspension, k);
         glide(&mut rv.values, &pose.values, k);
     }
-    // the wheels' travel (kneeling, bumps) as theirs
     let mut it = rv.suspension.iter();
     for axle in rv.vehicle.physics.wheels.iter_mut() {
         for w in axle.iter_mut() {
             w.suspension = it.next().copied().unwrap_or(0.0);
         }
     }
-    // the horn: pressed and let go as theirs (the scripts fire its sound events)
+    // Trigger rather than pin: the scripts fire the horn's sound events.
     let horn = pose.flags & omsi_net::FLAG_HORN != 0;
     if horn != rv.horn {
         rv.horn = horn;
@@ -2958,8 +2737,7 @@ fn drive_remote(rv: &mut RemoteVehicle, pose: &Pose, dt: f32, exact: bool) {
     let matched = pose.table == t.hash && !rv.stand_in;
     let engine = pose.flags & omsi_net::FLAG_ENGINE != 0;
     let electrics = pose.flags & omsi_net::FLAG_ELECTRICS != 0;
-    // the AI scripts' inputs: an engine that is off is off, lights as a level (0.5
-    // parking lights, 1 dipped, 2 main beam), the saloon lights, the pedals
+    // AI light levels: 0.5 parking, 1 dipped, 2 main beam.
     let mut inputs: Vec<(VarId, f32)> = Vec::with_capacity(8);
     let active = if engine || (electrics && t.engine_n.is_some()) {
         1.0
@@ -2977,14 +2755,13 @@ fn drive_remote(rv: &mut RemoteVehicle, pose: &Pose, dt: f32, exact: bool) {
     );
     inputs.extend(t.throttle.map(|id| (id, pose.throttle)));
     inputs.extend(t.brake.map(|id| (id, pose.brake)));
-    // what is pinned to their values: the engine speed, the doors, and - for the same
-    // vehicle files - the lamps, switches and sound and moving-part values
     let mut pinned: Vec<(VarId, f32)> =
         Vec::with_capacity(8 + t.lamps.len() + t.switches.len() + t.values.len());
     if !t.values.iter().any(|v| Some(v.1) == t.engine_n) {
         pinned.extend(t.engine_n.map(|id| (id, pose.rpm)));
     }
     pinned.extend(t.doors.iter().zip(&rv.doors).map(|(id, v)| (*id, *v)));
+    pinned.extend(rv.ibis_pins(pose));
     if matched
         && pose.lamps.len() == t.lamps.len()
         && pose.switches.len() == t.switches.len()
@@ -3018,9 +2795,8 @@ fn drive_remote(rv: &mut RemoteVehicle, pose: &Pose, dt: f32, exact: bool) {
         brake: pose.flags & omsi_net::FLAG_BRAKE != 0 || pose.brake > 0.1,
         lights: pose.head >= 2,
         at_station: if doors_open { 1 } else { -1 },
-        // Their stop's side is not on the wire: their doors are pinned to the openings
-        // they send (see `doors` above), so which side the player's own script opened is
-        // already in those values - the frame only runs the AI half of the script.
+        // Their stop side isn't sent: the doors are pinned to their values, and only the AI
+        // half of the script runs.
         at_station_side: 0.0,
         priority_warning: false,
     };
@@ -3028,7 +2804,6 @@ fn drive_remote(rv: &mut RemoteVehicle, pose: &Pose, dt: f32, exact: bool) {
     rv.last = pose.clone();
 }
 
-/// The outside sounds of a remote bus: made when it comes into earshot, dropped beyond.
 fn sound_remote(
     rv: &mut RemoteVehicle,
     audio: Option<&omsi_audio::AudioEngine>,
@@ -3042,9 +2817,7 @@ fn sound_remote(
     let (Some(audio), Some(at)) = (audio, listener) else {
         return;
     };
-    // Riding in it: its whole `[sound]` heard from inside, as our own bus is heard from its
-    // cab - not its outside sounds muffled, which a passenger heard as if standing in the
-    // street beside it (the exterior engine, the tyres, the doors from outside).
+    // A rider hears the bus's interior `[sound]`, not its exterior sounds muffled.
     let interior = inside.then_some(()).and(rv.table.interior.clone());
     if let Some((cfg, dir)) = interior {
         for mut s in rv.sounds.drain(..) {
@@ -3084,7 +2857,6 @@ fn sound_remote(
         return;
     }
     if rv.sounds.is_empty() && d < HEAR_RANGE && !rv.table.sounds.is_empty() {
-        // the clips are read in the background the first time; silent till then
         let ready = rv
             .table
             .sounds
@@ -3102,7 +2874,6 @@ fn sound_remote(
                     omsi_audio::SoundSet::new_exterior(audio, &cfg.chosen_for(&number), dir)
                 })
                 .collect();
-            // the rear sections' sounds ride on the first set, each at its section
             if let Some(first) = rv.sounds.first_mut() {
                 for (k, cfg, dir) in &rv.table.part_sounds {
                     first.add_part(
@@ -3130,10 +2901,6 @@ fn sound_remote(
     }
 }
 
-/// LAN play, once a frame: send our bus, take in the others', answer joining players,
-/// place our bus when the host's list arrives late, keep a drawn and heard vehicle for
-/// each player, follow the host's world and clock, and collect the chat. Returns what the
-/// game has to change about its world.
 #[allow(clippy::too_many_arguments)]
 pub fn tick(
     lan: &mut LanSession,
@@ -3154,7 +2921,7 @@ pub fn tick(
     mine.tour = frame.tour.clone().unwrap_or_default();
     mine.walker = frame.walker;
     if lan.role == Role::Host {
-        // the tours the others drive are theirs, not the timetable's
+        // tours other players drive are theirs, not the timetable's
         let tours: hashbrown::HashSet<(String, String)> = lan
             .peers()
             .filter_map(|p| p.pose.tour.split_once('/'))
@@ -3185,14 +2952,12 @@ pub fn tick(
         humans.as_deref_mut(),
         player.as_deref().map(|p| p.vehicle.position),
     );
-    // the host's world: taken over at a late welcome, the clock kept in step
     if let (Role::Client, Some(clock)) = (lan.role, frame.clock) {
         if lan.welcomes != game.adopted && lan.welcome.is_some() {
             updates.extend(adopt_at_runtime(args, lan, game, world, clock));
             game.slew = 0.0;
             lan.take_host_clock();
         } else if let Some(h) = lan.take_host_clock() {
-            // the host changed its weather (its administration): ours follows
             let norm = |s: &str| s.trim().replace('\\', "/").to_ascii_lowercase();
             if !h.world.weather.is_empty()
                 && norm(&h.world.weather) != norm(args.weather.as_deref().unwrap_or(""))
@@ -3227,14 +2992,11 @@ pub fn tick(
             }
         }
         if game.slew.abs() > 1.0e-3 {
-            // caught up within a few seconds
             let step = game.slew * (dt as f64 * 0.5).min(1.0);
             game.slew -= step;
             updates.push(WorldUpdate::Slew(step));
         }
     }
-    // a list of what stands at our spawn that came after the bus was placed: move it only
-    // if it has not been driven
     if lan.role == Role::Client && !lan.spawn_settled {
         if let (Some(near), Some(p), Some(world)) = (lan.near.clone(), player.as_deref_mut(), world)
         {
@@ -3248,8 +3010,7 @@ pub fn tick(
             lan.spawn_settled = true;
         }
     }
-    // OMSI_LAN_SAY="30=Hallo;45=Tschüss": chat lines said at these seconds of the session
-    // (for tests of games that have no keyboard: offscreen runs)
+    // OMSI_LAN_SAY="30=Hallo;45=Tschüss": chat lines said at these session seconds (offscreen)
     game.clock += dt;
     if let Ok(script) = omsi_cfg::env::var("OMSI_LAN_SAY") {
         for item in script.split(';') {
@@ -3287,8 +3048,6 @@ pub fn tick(
             release(r, scene, w, frame.audio, rv);
         }
     }
-    // a player the session forgot (timed out), or one that has no bus any more, is dropped
-    // as well
     let known: Vec<u32> = lan
         .peers()
         .filter(|p| !(p.has_pose && !p.pose.has_vehicle()))
@@ -3311,7 +3070,6 @@ pub fn tick(
         .map(|p| p.pose.clone())
         .collect();
     for pose in poses {
-        // another vehicle than before (the player changed buses): made again
         if game
             .remotes
             .get(&pose.id)
@@ -3350,9 +3108,9 @@ pub fn tick(
         let Some(rv) = game.remotes.get_mut(&pose.id) else {
             continue;
         };
-        // line and destination on the displays
+        // not when IBIS values are pinned in `drive_remote`: the AI trigger would overwrite them
         let want = (pose.line.clone(), pose.destination.clone());
-        if want != rv.shown && !want.1.is_empty() {
+        if want != rv.shown && !want.1.is_empty() && rv.ibis_pins(&pose).is_empty() {
             if let Some(i) = rv.vehicle.ty.program.str_var("Linie") {
                 rv.vehicle.state.str_vars[i as usize] = want.0.clone();
             }
@@ -3376,13 +3134,12 @@ pub fn tick(
             );
             rv.shown = want;
         }
-        // between their states as they were sent (older games: gliding towards the newest)
+        // older games send no clock: glide towards the newest pose
         if let Some(peer) = lan.peers().find(|p| p.pose.id == pose.id) {
             rv.take_samples(&peer.history);
         }
         match rv.interpolated() {
             Some(mut ip) => {
-                // (who they are, what their bus shows: the newest state's)
                 ip.name = pose.name.clone();
                 ip.bus = pose.bus.clone();
                 ip.table = pose.table;
@@ -3390,6 +3147,8 @@ pub fn tick(
                 ip.destination = pose.destination.clone();
                 ip.texts = pose.texts.clone();
                 ip.freetex = pose.freetex.clone();
+                ip.hof = pose.hof;
+                ip.ibis = pose.ibis.clone();
                 drive_remote(rv, &ip, dt, true);
             }
             None => drive_remote(rv, &pose, dt, false),
@@ -3399,11 +3158,9 @@ pub fn tick(
         let inside = frame.inside_of == Some(pose.id);
         sound_remote(rv, frame.audio, frame.listener, frame.muffled, inside);
     }
-    // draw them like AI traffic
     for (id, rv) in game.remotes.iter_mut() {
         if !rv.driver_tried && !rv.stand_in {
             rv.driver_tried = true;
-            // their own figure at the wheel (a figure picked by their id otherwise)
             rv.driver = crate::driver::DriverFigure::new_named(
                 w,
                 r,
@@ -3424,12 +3181,10 @@ pub fn tick(
                 false,
             );
         }
-        // drawn as the own bus is: its outside meshes from outside, its inside ones to
-        // whoever stands in it (the outside and the AI meshes together fought over the
-        // same surfaces - the flicker and the black patches in the saloon), opaque slots
-        // never faded by an alpha variable the AI scripts left at 0, the bellows skinned
+        // drawn like our own bus, not as AI: outside and AI meshes together fought over the
+        // same surfaces (flicker, black patches in the saloon)
         let inside = frame.inside_of == Some(*id);
-        // OMSI_TRACE_REMOTE=<file.csv>: where each other player's bus is drawn, every frame
+        // OMSI_TRACE_REMOTE=<file.csv>: logs where each remote bus is drawn, every frame
         if let Ok(path) = omsi_cfg::env::var("OMSI_TRACE_REMOTE") {
             use std::io::Write;
             if let Ok(mut f) = std::fs::OpenOptions::new()
@@ -3462,8 +3217,7 @@ pub fn tick(
     updates
 }
 
-/// `OMSI_DEBUG_LAN`: every few seconds, what we know of every player, what their bus
-/// shows and plays here, and the bytes that went over the network.
+/// `OMSI_DEBUG_LAN`: logs every player's state, sounds and network traffic every 4 s.
 fn debug_log(lan: &LanSession, game: &mut LanGame, dt: f32, frame: &Frame) {
     if omsi_cfg::env::var_os("OMSI_DEBUG_LAN").is_none() {
         return;
@@ -3528,7 +3282,6 @@ fn debug_log(lan: &LanSession, game: &mut LanGame, dt: f32, frame: &Frame) {
         );
         if let Some(rv) = game.remotes.get(&q.id) {
             let v = &rv.vehicle;
-            // (the cockpit's own lamps left out)
             let lit: Vec<&str> = rv
                 .table
                 .lamps
@@ -3605,14 +3358,7 @@ fn debug_log(lan: &LanSession, game: &mut LanGame, dt: f32, frame: &Frame) {
     }
 }
 
-// ---------------------------------------------------------------------------------------
-// chat
-
-/// A key while LAN play runs: the key bound to `chat_open` ('/' or '`', see
-/// `KeyboardCfg::with_game_defaults`) opens the chat line, the one bound to `chat_toggle` (V) hides and shows the chat - `bound` is the `[game]` action of `Inputs/keyboard.cfg` the
-/// key makes with the modifiers held. While the line is open every key is the chat's
-/// (Enter sends, Escape drops the line, Backspace takes a character back).
-/// Returns whether the key was taken. Text arrives through `chat_type`.
+/// Returns whether the chat took the key; an open chat line takes every key.
 pub fn chat_key(
     lan: &mut LanSession,
     game: &mut LanGame,
@@ -3637,7 +3383,6 @@ pub fn chat_key(
             chat.swallow.insert(code);
             return true;
         }
-        // the release of the key that opened or sent the line
         return !pressed && chat.swallow.remove(&code);
     }
     if !pressed {
@@ -3660,12 +3405,10 @@ pub fn chat_key(
     true
 }
 
-/// The key that opened the chat: its release is the chat's too.
 pub fn chat_swallow(game: &mut LanGame, code: KeyCode) {
     game.chat.swallow.insert(code);
 }
 
-/// Characters typed into an open chat line.
 pub fn chat_type(game: &mut LanGame, text: &str) {
     if let Some(t) = game.chat.typing.as_mut() {
         for c in text.chars().filter(|c| !c.is_control()) {
@@ -3676,17 +3419,14 @@ pub fn chat_type(game: &mut LanGame, text: &str) {
     }
 }
 
-/// Is the chat line open (the keys are the chat's)?
 pub fn chat_open(game: &LanGame) -> bool {
     game.chat.typing.is_some()
 }
 
-/// Say `text` to everybody.
 pub fn chat_send(lan: &mut LanSession, game: &mut LanGame, text: &str) {
     if text.trim().is_empty() {
         return;
     }
-    // `/admin <password>`: a server's administration (see `admin`), never said aloud
     if let Some(pw) = text.trim().strip_prefix("/admin ") {
         crate::admin::request(lan, pw.trim());
         game.chat
@@ -3703,15 +3443,8 @@ pub fn chat_send(lan: &mut LanSession, game: &mut LanGame, text: &str) {
     }
 }
 
-// ---------------------------------------------------------------------------------------
-// what the HUD shows
-
-/// The HUD's LAN lines: the session and its code, who is connected, what they drive and
-/// where they are, what differs between the host's world and ours, and the chat line.
 pub fn hud_lines(lan: &LanSession, _game: &LanGame, _player: Option<&Player>) -> Vec<String> {
-    // One line: who is there is written above their buses (`name_tags`), what they say is in
-    // the chat. The long list of every player's bus, place and doors that stood here filled
-    // half the screen in a session of a few players.
+    // Kept to one line: names are drawn above the buses (`name_tags`), talk is in the chat.
     let mut lines = Vec::new();
     let players = lan.peer_count();
     let others = match players {
@@ -3722,7 +3455,6 @@ pub fn hud_lines(lan: &LanSession, _game: &LanGame, _player: Option<&Player>) ->
     match lan.role {
         Role::Host => {
             let c = lan.code();
-            // (translated apart from the code, which stays as it is)
             lines.push(format!(
                 "{}   {}",
                 omsi_ui::tr(&format!("Online: {others}")),
@@ -3747,7 +3479,6 @@ pub fn hud_lines(lan: &LanSession, _game: &LanGame, _player: Option<&Player>) ->
     if let Some(w) = lan.warnings.first() {
         lines.push(format!("Online: {w}"));
     }
-    // OMSI_DEBUG_LAN: what the HUD shows, every few seconds
     if omsi_cfg::env::var_os("OMSI_DEBUG_LAN").is_some() {
         HUD_LOG.with(|t| {
             let now = Instant::now();
@@ -3771,8 +3502,8 @@ thread_local! {
 mod tests {
     use super::*;
 
-    /// What is seen comes before what is heard in the capped values list: the AA-FR Agora
-    /// L's sound variables filled it in name order before its roller blind's scroll.
+    /// Visual values outrank sound ones in the capped list: the Agora L's sounds crowded out
+    /// its roller blind's scroll.
     #[test]
     fn the_roller_blind_scroll_is_in_the_sync_table() {
         let root = omsi_cfg::env::var_os("OMSI_ROOT")
@@ -3795,9 +3526,6 @@ mod tests {
         }
     }
 
-    /// An articulated bus's rear section is in its sync table: its lamps, displays' switches
-    /// and outside sounds (the AA-FR Agora L's rear section stood dark and silent in the
-    /// other players' games).
     #[test]
     fn the_rear_section_is_in_the_sync_table() {
         let root = omsi_cfg::env::var_os("OMSI_ROOT")
