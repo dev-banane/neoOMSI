@@ -73,6 +73,7 @@ pub struct SyncTable {
     pub values: Vec<(String, VarId)>,
     /// `door_0`, `door_1` … as far as the scripts have them.
     pub doors: Vec<VarId>,
+    ibis: Vec<Option<VarId>>,
     pub hash: u32,
     /// Variables of the horn: its switch and the volume its sound follows.
     horn: Vec<VarId>,
@@ -89,6 +90,20 @@ pub struct SyncTable {
     interior: Option<(Arc<omsi_vehicle::SoundCfg>, PathBuf)>,
     /// The rear sections' outside sounds (`[sound_ai]`, or `[sound]`), by section.
     part_sounds: Vec<(usize, Arc<omsi_vehicle::SoundCfg>, PathBuf)>,
+}
+
+const IBIS_VARS: [&str; 6] = [
+    "IBIS_Linie_Complex",
+    "IBIS_Linie_Suffix",
+    "IBIS_LinieKurs",
+    "IBIS_TerminusIndex",
+    "IBIS_TerminusCode",
+    "IBIS_RouteIndex",
+];
+
+fn hof_key(h: &omsi_vehicle::Hof) -> u32 {
+    let key = format!("{}|{}", h.name.trim().to_lowercase(), h.termini.len());
+    fnv1a(key.as_bytes()).max(1)
 }
 
 /// Engine variables every copy works out for itself (or that come in the pose).
@@ -401,6 +416,7 @@ impl SyncTable {
             switches,
             values,
             doors,
+            ibis: IBIS_VARS.iter().map(|n| var(n)).collect(),
             horn,
             engine_n: var("engine_n"),
             ai_engine: var("AI_Engine"),
@@ -1902,6 +1918,13 @@ pub fn my_pose(
     let (line, destination) = line_and_destination(p, duty);
     let texts = display_texts(v);
     let freetex = freetex_values(v);
+    let (hof, ibis) = match v.host.hof.as_deref() {
+        Some(h) => (
+            hof_key(h),
+            table.ibis.iter().map(|id| id.map(get)).collect(),
+        ),
+        None => (0, Vec::new()),
+    };
     Pose {
         id: 0,
         name: String::new(),
@@ -1912,6 +1935,8 @@ pub fn my_pose(
         tour: String::new(),
         texts,
         freetex,
+        hof,
+        ibis,
         figure: p
             .driver
             .as_ref()
@@ -2656,6 +2681,18 @@ fn lan_now() -> f64 {
 const INTERP_DELAY: f64 = 0.12;
 
 impl RemoteVehicle {
+    fn ibis_pins(&self, pose: &Pose) -> Vec<(VarId, f32)> {
+        if self.stand_in || pose.hof == 0 || self.hof.as_deref().map(hof_key) != Some(pose.hof) {
+            return Vec::new();
+        }
+        self.table
+            .ibis
+            .iter()
+            .zip(&pose.ibis)
+            .filter_map(|(id, v)| Some(((*id)?, (*v)?)))
+            .collect()
+    }
+
     /// Take in the states that came (with when they arrived).
     fn take_samples(&mut self, history: &std::collections::VecDeque<(Instant, Pose)>) {
         let now_i = Instant::now();
@@ -2985,6 +3022,7 @@ fn drive_remote(rv: &mut RemoteVehicle, pose: &Pose, dt: f32, exact: bool) {
         pinned.extend(t.engine_n.map(|id| (id, pose.rpm)));
     }
     pinned.extend(t.doors.iter().zip(&rv.doors).map(|(id, v)| (*id, *v)));
+    pinned.extend(rv.ibis_pins(pose));
     if matched
         && pose.lamps.len() == t.lamps.len()
         && pose.switches.len() == t.switches.len()
@@ -3350,9 +3388,10 @@ pub fn tick(
         let Some(rv) = game.remotes.get_mut(&pose.id) else {
             continue;
         };
-        // line and destination on the displays
+        // line and destination on the displays (their exact IBIS values pinned in
+        // `drive_remote` where they come; the AI trigger would set ours by name over them)
         let want = (pose.line.clone(), pose.destination.clone());
-        if want != rv.shown && !want.1.is_empty() {
+        if want != rv.shown && !want.1.is_empty() && rv.ibis_pins(&pose).is_empty() {
             if let Some(i) = rv.vehicle.ty.program.str_var("Linie") {
                 rv.vehicle.state.str_vars[i as usize] = want.0.clone();
             }
@@ -3390,6 +3429,8 @@ pub fn tick(
                 ip.destination = pose.destination.clone();
                 ip.texts = pose.texts.clone();
                 ip.freetex = pose.freetex.clone();
+                ip.hof = pose.hof;
+                ip.ibis = pose.ibis.clone();
                 drive_remote(rv, &ip, dt, true);
             }
             None => drive_remote(rv, &pose, dt, false),

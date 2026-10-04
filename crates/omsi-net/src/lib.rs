@@ -33,7 +33,7 @@
 //! DISCOVER|<proto>                               broadcast, client → any host
 //! HERE|<proto>|<host name>|<session>|<map>|<players>
 //!                                                host → client
-//! INFO|<id>|<name>|<bus>|<paint>|<line>|<destination>|length|width|box offset|<table>|<tour>|<display texts, hex, comma separated>|<figure .hum>
+//! INFO|<id>|<name>|<bus>|<paint>|<line>|<destination>|length|width|box offset|<table>|<tour>|<display texts, hex, comma separated>|<figure .hum>|<freetex, hex>|<depot key>;<IBIS values>
 //!                                                every two seconds and on a change; relayed
 //! PLACE|<id>|x|y|z|heading|length|width          client → host, once its bus stands
 //! NEAR|<id>|<footprints>                         host → client
@@ -869,6 +869,8 @@ pub struct Pose {
     /// names, see the game's `lan.rs`): the picture a roller blind or a sign shows, which the
     /// others' copy of the bus cannot work out, its scripts not running there.
     pub freetex: Vec<String>,
+    pub hof: u32,
+    pub ibis: Vec<Option<f32>>,
     /// The player's own figure (`.hum` relative to its content root), for the driver at the
     /// wheel and the walker the others draw (empty: they pick one of the map's drivers).
     pub figure: String,
@@ -978,13 +980,19 @@ impl Pose {
             "{head}{}|{figure}",
             encode_texts(&self.texts, MAX_TEXTS, MAX_TEXT_LEN, room)
         );
-        // the `[matl_freetex]` pictures last, in what room is left (an older game reads the
-        // fields it knows and passes this one by)
-        let room = MAX_DATAGRAM.saturating_sub(info.len() + 1);
-        format!(
+        // the `[matl_freetex]` pictures in what room is left (an older game reads the fields
+        // it knows and passes the rest by), then the IBIS values the matrix is drawn from
+        let ibis = encode_ibis(self.hof, &self.ibis);
+        let room = MAX_DATAGRAM.saturating_sub(info.len() + ibis.len() + 2);
+        let info = format!(
             "{info}|{}",
             encode_texts(&self.freetex, MAX_FREETEX, MAX_FREETEX_LEN, room)
-        )
+        );
+        if ibis.is_empty() {
+            info
+        } else {
+            format!("{info}|{ibis}")
+        }
     }
 
     /// The info fields of an `INFO` message (checked and cleaned), or None.
@@ -999,6 +1007,7 @@ impl Pose {
                 .ok()
                 .filter(|v| v.is_finite() && *v >= lo && *v <= hi)
         };
+        let (hof, ibis) = parts.get(15).map(|f| decode_ibis(f)).unwrap_or_default();
         Some(Pose {
             id: parts[1].trim().parse().ok()?,
             name: clean_text(parts[2], MAX_NAME),
@@ -1026,6 +1035,8 @@ impl Pose {
                 .get(14)
                 .map(|t| decode_texts(t, MAX_FREETEX, MAX_FREETEX_LEN))
                 .unwrap_or_default(),
+            hof,
+            ibis,
             ..Default::default()
         })
     }
@@ -1040,6 +1051,8 @@ impl Pose {
         self.tour = info.tour.clone();
         self.texts = info.texts.clone();
         self.freetex = info.freetex.clone();
+        self.hof = info.hof;
+        self.ibis = info.ibis.clone();
         self.figure = info.figure.clone();
         self.length = info.length;
         self.width = info.width;
@@ -1060,6 +1073,8 @@ impl Pose {
             tour: keep.tour,
             texts: keep.texts,
             freetex: keep.freetex,
+            hof: keep.hof,
+            ibis: keep.ibis,
             figure: keep.figure,
             length: keep.length,
             width: keep.width,
@@ -1101,7 +1116,9 @@ fn finite_or(v: f32, or: f32) -> f32 {
 /// surrounding blanks, at most `max` characters.
 /// Display texts at most (and characters each) an `INFO` carries.
 pub const MAX_TEXTS: usize = 12;
-const MAX_TEXT_LEN: usize = 32;
+const MAX_TEXT_LEN: usize = 64;
+pub const MAX_IBIS: usize = 16;
+const IBIS_RANGE: f32 = 1.0e6;
 /// `[matl_freetex]` strings at most (and characters each): paths to a picture, longer than
 /// a display's text (`..\..\Anzeigen\Rollband_FC\<depot>\17.tga`).
 pub const MAX_FREETEX: usize = 8;
@@ -1128,6 +1145,43 @@ fn encode_texts(texts: &[String], max: usize, max_len: usize, room: usize) -> St
         })
         .collect::<Vec<_>>()
         .join(",")
+}
+
+fn encode_ibis(hof: u32, vars: &[Option<f32>]) -> String {
+    if hof == 0 || vars.iter().all(|v| v.is_none()) {
+        return String::new();
+    }
+    let values: Vec<String> = vars
+        .iter()
+        .take(MAX_IBIS)
+        .map(|v| {
+            v.filter(|x| x.is_finite())
+                .map(|x| x.clamp(-IBIS_RANGE, IBIS_RANGE).to_string())
+                .unwrap_or_default()
+        })
+        .collect();
+    format!("{hof:08X};{}", values.join(","))
+}
+
+fn decode_ibis(field: &str) -> (u32, Vec<Option<f32>>) {
+    let Some((key, values)) = field.trim().split_once(';') else {
+        return (0, Vec::new());
+    };
+    let hof = u32::from_str_radix(key, 16).unwrap_or(0);
+    if hof == 0 {
+        return (0, Vec::new());
+    }
+    let vars = values
+        .split(',')
+        .take(MAX_IBIS)
+        .map(|v| {
+            v.trim()
+                .parse::<f32>()
+                .ok()
+                .filter(|x| x.is_finite() && x.abs() <= IBIS_RANGE)
+        })
+        .collect();
+    (hof, vars)
 }
 
 fn decode_texts(field: &str, max: usize, max_len: usize) -> Vec<String> {

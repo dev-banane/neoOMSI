@@ -95,6 +95,60 @@ fn info_carries_the_freetex_pictures_and_an_older_info_has_none() {
 }
 
 #[test]
+fn info_carries_the_ibis_values_and_an_older_info_has_none() {
+    let mut p = pose(1.5);
+    p.texts = vec![format!("{0}@{0}@{0}", "Hauptbahnhof    ")];
+    p.freetex = vec![r"..\..\Anzeigen\SteckSchilder\E.bmp".into()];
+    p.hof = 0x5A4D_0C31;
+    p.ibis = vec![Some(1205.0), Some(5.0), None, Some(0.0), Some(-1.0), Some(12.5)];
+    let text = p.encode_info();
+    let q = Pose::decode_info(&text.split('|').collect::<Vec<_>>()).unwrap();
+    assert_eq!((q.hof, &q.ibis), (p.hof, &p.ibis));
+    assert_eq!(q.texts, p.texts, "an Annax matrix's three lines come whole");
+    assert_eq!(q.freetex, p.freetex);
+    // an older game's INFO ends before them: nothing to pin, the rest as before
+    let older = text.rsplit_once('|').unwrap().0;
+    let q = Pose::decode_info(&older.split('|').collect::<Vec<_>>()).unwrap();
+    assert_eq!((q.hof, q.ibis.len()), (0, 0));
+    assert_eq!(q.freetex, p.freetex);
+    // and without them the INFO is what an older game sends
+    let mut none = p.clone();
+    none.hof = 0;
+    assert_eq!(none.encode_info(), older);
+    none.hof = p.hof;
+    none.ibis = vec![None, None];
+    assert_eq!(none.encode_info(), older);
+    // what is not a number, or out of range, is no value
+    for (field, want) in [
+        (
+            "0000ABCD;1,x,,inf,NaN,2e9,-3",
+            vec![Some(1.0), None, None, None, None, None, Some(-3.0)],
+        ),
+        ("00000000;1,2", vec![]),
+        ("zz;1", vec![]),
+        ("1205", vec![]),
+    ] {
+        let (_, vars) = decode_ibis(field);
+        assert_eq!(vars, want, "{field}");
+    }
+    let (_, vars) = decode_ibis(&format!("1;{}", "7,".repeat(100)));
+    assert_eq!(vars.len(), MAX_IBIS);
+    // everything at its longest still fits one datagram
+    p.ibis = vec![Some(-999_999.9); MAX_IBIS];
+    p.freetex = (0..MAX_FREETEX)
+        .map(|k| format!("{k}{}", "é".repeat(200)))
+        .collect();
+    p.bus = format!("Vehicles/{}/{}.bus", "Ü".repeat(60), "b".repeat(120));
+    p.texts = (0..MAX_TEXTS)
+        .map(|k| format!("{k}ß{}", "ñ".repeat(80)))
+        .collect();
+    let text = p.encode_info();
+    assert!(text.len() <= MAX_DATAGRAM, "{} bytes", text.len());
+    let q = Pose::decode_info(&text.split('|').collect::<Vec<_>>()).unwrap();
+    assert_eq!(q.ibis, p.ibis);
+}
+
+#[test]
 fn info_round_trip_and_cleaning() {
     let mut p = pose(1.5);
     p.id = 7;
