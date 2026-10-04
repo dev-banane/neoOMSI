@@ -13,13 +13,16 @@ import struct
 import subprocess
 import sys
 
-from PIL import Image
+from PIL import Image, ImageChops
 
 HERE = pathlib.Path(__file__).resolve().parent
 CACHE = HERE / ".cache"
+MPFB_PROFILE = CACHE / "mpfb" / "profile"
 # screen size (twice the person's height over the distance, in view heights) each
 # level is drawn down to: about 14 m and 43 m at a 60 degree view
 LOD_SIZES = [0.25, 0.08, 0.0]
+VARIANTS = [(140, (0.35, 0.45, 0.8), 0.45, 1.0), (215, (0.75, 0.35, 0.3), 0.4, 1.0),
+            (0, (0.5, 0.5, 0.5), 0.0, 0.45)]
 BONES = ["OS_L", "OS_R", "US_L", "US_R", "OA_L", "OA_R", "UA_L", "UA_R",
          "Hip", "Main", "Head", "Hand_L", "Hand_R"]
 
@@ -56,7 +59,7 @@ def replace_values(lines, keyword, new):
     lines.extend(["", keyword] + new)
 
 
-def write_hum(stock_path, out_path, model, info, weight):
+def write_hum(stock_path, out_path, model, info, weight, age=None, walk=None):
     text = stock_path.read_bytes().decode("cp1252")
     lines = text.splitlines()
     found = dict((k, i) for i, k in blocks(text))
@@ -72,11 +75,18 @@ def write_hum(stock_path, out_path, model, info, weight):
         replace_values(lines, "[seatheight]", [f"{links[2] - (stock_links[2] - seat):.2f}"])
     if weight != 1.0:
         replace_values(lines, "[neo_weight]", [f"{weight:g}"])
+    if age is not None:
+        replace_values(lines, "[age]", [str(age)])
+    if walk:
+        replace_values(lines, "[walk_param]", [f"{v:g}" for v in walk])
     out_path.write_bytes(("\r\n".join(lines) + "\r\n").encode("cp1252"))
 
 
-def write_cfg(path, meshes, textures, alpha):
+def write_cfg(path, meshes, textures, alpha, ctc):
     out = []
+    if ctc:
+        folder, body = ctc
+        out += ["[CTC]", "Colorscheme", folder, "0", "", "[CTCTexture]", "farbschema", body, ""]
     for size, mesh in zip(LOD_SIZES, meshes):
         out += ["[LOD]", str(size), "", "[mesh]", mesh, ""]
         for b in BONES:
@@ -114,10 +124,73 @@ def write_dds(img, dst, pixel_format):
     dst.write_bytes(bytes(header) + b"".join(data))
 
 
-def convert_texture(src, dst, size, keep_alpha):
-    img = Image.open(src).convert("RGBA" if keep_alpha else "RGB")
+def ramp(lo, hi):
+    return [round(255 * min(1.0, max(0.0, (x - lo) / (hi - lo)))) for x in range(256)]
+
+
+def skin_hue(x):
+    deg = x / 255 * 360
+    d = min(abs(deg - 22), 360 - abs(deg - 22))
+    return round(255 * min(1.0, max(0.0, 1 - (d - 20) / 14)))
+
+
+def recolor(rgb, hue_turn, tint, tint_amount, value):
+    """The cloth in other colours; skin (orange hues, neither grey nor garish) stays."""
+    h, s, v = rgb.convert("HSV").split()
+    skin = ImageChops.multiply(h.point([skin_hue(x) for x in range(256)]),
+                               s.point(ramp(0.1 * 255, 0.2 * 255)))
+    skin = ImageChops.multiply(skin, s.point([255 - y for y in ramp(0.65 * 255, 0.8 * 255)]))
+    skin = ImageChops.multiply(skin, v.point(ramp(0.08 * 255, 0.18 * 255)))
+    coloured = s.point(ramp(0.12 * 255, 0.22 * 255))
+    turn = round(hue_turn / 360 * 256)
+    shifted = Image.merge("HSV", (h.point([(x + turn) % 256 for x in range(256)]), s, v))
+    shifted = shifted.convert("RGB")
+    lum = rgb.convert("L")
+    tinted = Image.merge("RGB", [lum.point([min(255, round(x * c * 1.6)) for x in range(256)])
+                                 for c in tint])
+    out = Image.composite(shifted, Image.blend(rgb, tinted, tint_amount), coloured)
+    if value != 1.0:
+        out = out.point([round(x * value) for x in range(256)] * 3)
+    return Image.composite(rgb, out, skin)
+
+
+def has_alpha(img):
+    return img.mode in ("RGBA", "LA", "PA", "P") and img.convert("RGBA").getchannel("A").getextrema()[0] < 250
+
+
+def greyed(img):
+    rgba = img.convert("RGBA")
+    grey = rgba.convert("L").point([round(150 + x * 0.42) for x in range(256)])
+    out = Image.merge("RGBA", (grey, grey, grey, rgba.getchannel("A")))
+    return out if has_alpha(img) else out.convert("RGB")
+
+
+def fit(img, size):
     if max(img.size) > size:
-        img = img.resize((size, size), Image.LANCZOS)
+        k = size / max(img.size)
+        img = img.resize((max(4, round(img.width * k)), max(4, round(img.height * k))), Image.LANCZOS)
+    return img
+
+
+def write_variants(src, folder, size):
+    folder.mkdir(parents=True, exist_ok=True)
+    img = fit(Image.open(src), size)
+    alpha = img.convert("RGBA").getchannel("A") if has_alpha(img) else None
+    rgb = img.convert("RGB")
+    items = []
+    for k, (turn, tint, amount, value) in enumerate(VARIANTS, 1):
+        name = f"{src.stem}_v{k}.dds"
+        if not (folder / name).exists():
+            out = recolor(rgb, turn, tint, amount, value)
+            if alpha:
+                out.putalpha(alpha)
+            write_dds(out, folder / name, "DXT5" if alpha else "DXT1")
+        items += ["[item]", f"Variante{k}", "farbschema", name, ""]
+    (folder / "texvarianten.cti").write_bytes(("\r\n".join(items) + "\r\n").encode("cp1252"))
+
+
+def convert_texture(img, dst, size, keep_alpha):
+    img = fit(img.convert("RGBA" if keep_alpha else "RGB"), size)
     write_dds(img, dst, "DXT5" if keep_alpha else "DXT1")
 
 
@@ -129,41 +202,76 @@ def weight_of(avatar, weights):
     return weights.get(best, 1.0)
 
 
-def build_figure(args, blender, stock, hum_out, avatar, weight):
-    name = avatar.rsplit("/", 1)[1]
-    src = CACHE / avatar
-    model_dir = hum_out.parent / "rocketbox" / name
+def build_figure(args, blender, stock, hum_out, source, weight, person=None):
+    env = None
+    if person:
+        name = person["name"]
+        model_dir = hum_out.parent / "generated" / name
+        model_dir.mkdir(parents=True, exist_ok=True)
+        spec = model_dir / f"{name}.person.json"
+        spec.write_text(json.dumps(person["spec"]))
+        given = str(spec)
+        env = dict(os.environ)
+        for var, sub_dir in (("BLENDER_USER_RESOURCES", ""), ("BLENDER_USER_CONFIG", "config"),
+                             ("BLENDER_USER_SCRIPTS", "scripts"), ("BLENDER_USER_DATAFILES", "datafiles"),
+                             ("BLENDER_USER_EXTENSIONS", "extensions")):
+            env[var] = str(MPFB_PROFILE / sub_dir)
+        files = {}
+        model_rel = f"generated\\{name}"
+    else:
+        name = source.rsplit("/", 1)[1]
+        model_dir = hum_out.parent / "rocketbox" / name
+        given = str(CACHE / source / "Export" / f"{name}.fbx")
+        files = {f.name.lower(): f for f in (CACHE / source / "Textures").iterdir()}
+        model_rel = f"rocketbox\\{name}"
     tex_dir = model_dir / "texture"
     tex_dir.mkdir(parents=True, exist_ok=True)
     sidecar = model_dir / f"{name}.json"
-    r = subprocess.run(
-        [blender, "-b", "--factory-startup", "-P", str(HERE / "blender_export.py"), "--",
-         str(src / "Export" / f"{name}.fbx"), str(model_dir / name), str(sidecar)],
-        capture_output=True, text=True)
+    cmd = [blender, "-b", "-P", str(HERE / "blender_export.py"), "--", given,
+           str(model_dir / name), str(sidecar)]
+    if not person:
+        cmd.insert(2, "--factory-startup")
+    r = subprocess.run(cmd, capture_output=True, text=True, env=env)
     if r.returncode != 0 or not sidecar.exists():
-        raise RuntimeError(f"{avatar}: Blender failed\n{r.stdout[-3000:]}\n{r.stderr[-3000:]}")
+        raise RuntimeError(f"{source}: Blender failed\n{r.stdout[-3000:]}\n{r.stderr[-3000:]}")
     info = json.loads(sidecar.read_text())
     sidecar.unlink()
-    files = {p.name.lower(): p for p in (src / "Textures").iterdir()}
-    textures, alpha = [], []
+    if person:
+        spec.unlink()
+    textures, alpha, sources = [], [], {}
     for m in info["materials"]:
         if not m["texture"]:
             continue
-        tga = files.get(m["texture"].lower())
-        if tga is None:
-            raise RuntimeError(f"{avatar}: no texture {m['texture']} for material {m['name']}")
-        dds = tga.stem + ".dds"
-        see_through = "opacity" in m["name"].lower() or "opacity" in tga.stem.lower()
-        if dds not in textures:
-            textures.append(dds)
-            if see_through:
-                alpha.append(dds)
+        path = pathlib.Path(m["texture"])
+        if not path.exists():
+            path = files.get(path.name.lower())
+        if path is None:
+            raise RuntimeError(f"{source}: no texture {m['texture']} for material {m['name']}")
+        dds = path.stem + ".dds"
+        if dds in textures:
+            continue
+        img = Image.open(path)
+        if person and person.get("age", 0) >= 60 and re.search(r"[\\/](hair|eyebrows)[\\/]", str(path)):
+            img = greyed(img)
+        see_through = "opacity" in m["name"].lower() or "opacity" in path.stem.lower() or has_alpha(img)
+        textures.append(dds)
+        sources[dds] = path
+        if see_through:
+            alpha.append(dds)
         if not (tex_dir / dds).exists():
-            convert_texture(tga, tex_dir / dds, args.size, see_through)
-    write_cfg(model_dir / f"{name}.cfg", [lv["file"] for lv in info["levels"]], textures, alpha)
-    write_hum(stock, hum_out, f"rocketbox\\{name}\\{name}.cfg", info, weight)
+            convert_texture(img, tex_dir / dds, args.size, see_through)
+    # the clothes recoloured: Rocketbox has them on the body's texture, MakeHuman a suit's
+    body = next((t for t in textures if "_body_color" in t.lower()), None) \
+        or next((t for t in textures if "suit" in t.lower()), None)
+    ctc = None
+    if body:
+        write_variants(sources[body], model_dir / "variants", args.size)
+        ctc = (f"{model_rel}\\variants", body)
+    write_cfg(model_dir / f"{name}.cfg", [lv["file"] for lv in info["levels"]], textures, alpha, ctc)
+    write_hum(stock, hum_out, f"{model_rel}\\{name}.cfg", info, weight,
+              person.get("age") if person else None, person.get("walk") if person else None)
     tris = " / ".join(str(lv["triangles"]) for lv in info["levels"])
-    return f"{hum_out.relative_to(args.out)} <- {avatar}: {tris} triangles, {info['height']} m"
+    return f"{hum_out.relative_to(args.out)} <- {source}: {tris} triangles, {info['height']} m"
 
 
 def main():
@@ -191,6 +299,14 @@ def main():
             out = args.out / hum
             out = out.with_name(f"{out.stem}~{alt.rsplit('/', 1)[1]}.hum")
             work.append((stock, out, alt, weight_of(alt, pax["weights"])))
+    for person in pax.get("generated", []):
+        hum = person["slot"]
+        if (args.only and hum != args.only) or not (args.omsi / hum).exists():
+            continue
+        out = args.out / hum
+        out = out.with_name(f"{out.stem}~{person['name']}.hum")
+        work.append((args.omsi / hum, out, f"generated/{person['name']}",
+                     person.get("weight", 1.0), person))
 
     failed = False
     with concurrent.futures.ThreadPoolExecutor(args.jobs) as pool:

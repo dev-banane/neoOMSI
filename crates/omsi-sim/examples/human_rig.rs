@@ -44,7 +44,8 @@ fn report(t: &HumanType) {
         t.def.walk_param
     );
     println!(
-        "   levels {:?}: vertices {}",
+        "   {} clothing variants, levels {:?}: vertices {}",
+        t.variants.len(),
         t.levels,
         (0..t.levels.len())
             .map(|l| (0..t.mesh_count())

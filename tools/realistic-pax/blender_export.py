@@ -1,4 +1,5 @@
-# blender -b --factory-startup -P blender_export.py -- <in.fbx> <out prefix> <out.json>
+# blender -b --factory-startup -P blender_export.py -- <in.fbx | person.json> <out prefix> <out.json>
+# (a person.json is made with MPFB, which must be installed in the Blender profile used)
 
 import json
 import re
@@ -8,33 +9,50 @@ import sys
 import bpy
 from mathutils import Matrix, Vector
 
-LODS = [("_mid", 0.3), ("_low", 0.08)]
+# triangles of each level at most: the first keeps a Rocketbox figure as it is
+LODS = [("", 10000), ("_mid", 2700), ("_low", 700)]
 OMSI_BONES = ["OS_L", "OS_R", "US_L", "US_R", "OA_L", "OA_R", "UA_L", "UA_R",
               "Hip", "Main", "Head", "Hand_L", "Hand_R"]
+FINGERS = ("thumb_", "index_", "middle_", "ring_", "pinky_")
 
 
 def omsi_bone_of(name):
     n = re.sub(r"^Bip\d+", "", name).strip()
     for side in ("L", "R"):
-        if n == f"{side} Thigh":
+        s = side.lower()
+        if n in (f"{side} Thigh", f"thigh_{s}"):
             return f"OS_{side}"
-        if n in (f"{side} Calf", f"{side} Foot") or n.startswith(f"{side} Toe"):
+        if n in (f"{side} Calf", f"{side} Foot", f"calf_{s}", f"foot_{s}", f"ball_{s}") \
+                or n.startswith(f"{side} Toe"):
             return f"US_{side}"
-        if n == f"{side} UpperArm":
+        if n in (f"{side} UpperArm", f"upperarm_{s}"):
             return f"OA_{side}"
-        if n == f"{side} Forearm":
+        if n in (f"{side} Forearm", f"lowerarm_{s}"):
             return f"UA_{side}"
-        if n == f"{side} Hand" or n.startswith(f"{side} Finger"):
+        if n in (f"{side} Hand", f"hand_{s}") or n.startswith(f"{side} Finger") \
+                or (n.startswith(FINGERS) and n.endswith(f"_{s}")):
             return f"Hand_{side}"
-        if n == f"{side} Clavicle":
+        if n in (f"{side} Clavicle", f"clavicle_{s}"):
             return "Main"
-    if n == "Pelvis":
+    if n in ("Pelvis", "pelvis"):
         return "Hip"
-    if n.startswith("Spine") or n == "Neck":
+    if n.startswith(("Spine", "spine_")) or n in ("Neck", "neck_01"):
         return "Main"
-    if n == "Head":
+    if n in ("Head", "head"):
         return "Head"
     return None
+
+
+def skeleton(arm):
+    """The bones `main` measures and poses, by role, in this armature's naming."""
+    if "thigh_r" in arm.data.bones:
+        return {"thigh": "thigh_{s}", "calf": "calf_{s}", "waist": "spine_02",
+                "upperarm": "upperarm_{s}", "forearm": "lowerarm_{s}", "head": "head",
+                "hand": "hand_{s}", "finger": "middle_01_{s}"}
+    bip = next(b.name for b in arm.data.bones if b.parent is None).split()[0]
+    return {"thigh": bip + " {S} Thigh", "calf": bip + " {S} Calf", "waist": bip + " Spine1",
+            "upperarm": bip + " {S} UpperArm", "forearm": bip + " {S} Forearm",
+            "head": bip + " Head", "hand": bip + " {S} Hand", "finger": bip + " {S} Finger2"}
 
 
 def resolve(arm, name):
@@ -60,18 +78,33 @@ def aim(arm, bone, toward, target):
 
 
 def to_omsi(v):
-    # Rocketbox faces -y with its left side at +x; OMSI's people face +y with the right at +x.
+    # Rocketbox and MakeHuman face -y with their left side at +x; OMSI's people face +y
+    # with the right at +x.
     return Vector((-v.x, -v.y, v.z))
 
 
 def texture_of(mat):
+    """The picture the material's colour comes from, searched upstream of Base Color."""
     if not mat or not mat.use_nodes:
         return None
     for n in mat.node_tree.nodes:
-        if n.type == "BSDF_PRINCIPLED" and n.inputs["Base Color"].links:
-            img = getattr(n.inputs["Base Color"].links[0].from_node, "image", None)
-            if img and img.filepath:
-                return img.filepath.replace("\\", "/").rsplit("/", 1)[-1]
+        if n.type != "BSDF_PRINCIPLED" or not n.inputs["Base Color"].links:
+            continue
+        todo, seen, found = [n.inputs["Base Color"].links[0].from_node], set(), []
+        while todo:
+            node = todo.pop(0)
+            if node.name in seen:
+                continue
+            seen.add(node.name)
+            img = getattr(node, "image", None)
+            if node.type == "TEX_IMAGE" and img and img.filepath:
+                found.append(bpy.path.abspath(img.filepath))
+            for i in node.inputs:
+                todo.extend(link.from_node for link in i.links)
+        # (MakeHuman's materials mix an occlusion map into the colour)
+        found.sort(key=lambda f: ("diffuse" not in f.lower(), "_ao" in f.lower()))
+        if found:
+            return found[0]
     return None
 
 
@@ -79,15 +112,20 @@ def decimated(ob, ratio):
     c = ob.copy()
     c.data = ob.data.copy()
     bpy.context.scene.collection.objects.link(c)
-    if c.data.shape_keys:
-        c.shape_key_clear()
-    mod = c.modifiers.new("lod", "DECIMATE")
-    mod.ratio = ratio
-    mod.use_collapse_triangulate = True
-    # decimated before the armature bends it, so the weights still belong to the vertices
     with bpy.context.temp_override(object=c, active_object=c, selected_objects=[c]):
-        bpy.ops.object.modifier_move_to_index(modifier=mod.name, index=0)
-        bpy.ops.object.modifier_apply(modifier=mod.name)
+        if c.data.shape_keys:
+            bpy.ops.object.shape_key_remove(all=True, apply_mix=True)
+        # the body under the clothes goes before the armature bends what is left
+        for mod in [m for m in c.modifiers if m.type == "MASK"]:
+            bpy.ops.object.modifier_move_to_index(modifier=mod.name, index=0)
+            bpy.ops.object.modifier_apply(modifier=mod.name)
+        if ratio < 1.0:
+            mod = c.modifiers.new("lod", "DECIMATE")
+            mod.ratio = ratio
+            mod.use_collapse_triangulate = True
+            # decimated before the armature bends it, so the weights still belong to the vertices
+            bpy.ops.object.modifier_move_to_index(modifier=mod.name, index=0)
+            bpy.ops.object.modifier_apply(modifier=mod.name)
     return c
 
 
@@ -124,6 +162,8 @@ def bake(arm, meshes, mats, textures):
             if total <= 0.0:
                 acc, total = {"Main": 1.0}, 1.0
             per_vertex.append({b: w / total for b, w in acc.items() if w / total >= 0.01})
+        if len(me.vertices) != len(src.vertices):
+            raise SystemExit(f"{ob.name}: its modifiers change the vertices")
         index = {}
         for t in me.loop_triangles:
             ids = []
@@ -160,7 +200,7 @@ def write_o3d(path, verts, tris, mats, textures, weights):
         f.write(b"\x26" + struct.pack("<H", len(mats)))
         for name in mats:
             t = textures.get(name)
-            tex = (t.rsplit(".", 1)[0] + ".dds" if t else "").encode("cp1252")
+            tex = (re.split(r"[\\/]", t)[-1].rsplit(".", 1)[0] + ".dds" if t else "").encode("cp1252")
             f.write(struct.pack("<11f", 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 1))
             f.write(bytes([len(tex)]) + tex)
         f.write(b"\x79" + struct.pack("<16f", 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1))
@@ -175,45 +215,64 @@ def write_o3d(path, verts, tris, mats, textures, weights):
                 f.write(struct.pack("<If", k, w))
 
 
+def make_person(spec):
+    from bl_ext.user_default.mpfb.services import HumanService
+    info = HumanService._create_default_human_info_dict()
+    info.update(spec)
+    settings = HumanService.get_default_deserialization_settings()
+    settings["subdiv_levels"] = 0
+    HumanService.deserialize_from_dict(info, settings)
+    kinds = {o.name: o.get("MPFB_GEN_object_type") for o in bpy.data.objects}
+    # the full body stays behind the proxy fitted to it
+    if "Proxymeshes" in kinds.values():
+        for o in bpy.data.objects:
+            if kinds[o.name] == "Basemesh":
+                bpy.data.objects.remove(o)
+
+
 def main():
-    fbx, prefix, out_json = sys.argv[sys.argv.index("--") + 1:][:3]
+    source, prefix, out_json = sys.argv[sys.argv.index("--") + 1:][:3]
     bpy.ops.wm.read_factory_settings(use_empty=True)
-    bpy.ops.import_scene.fbx(filepath=fbx)
+    if source.lower().endswith(".json"):
+        with open(source) as f:
+            make_person(json.load(f))
+    else:
+        bpy.ops.import_scene.fbx(filepath=source)
     arm = next(o for o in bpy.data.objects if o.type == "ARMATURE")
     meshes = [o for o in bpy.data.objects if o.type == "MESH"]
-    bip = next(b.name for b in arm.data.bones if b.parent is None).split()[0]
+    bones = skeleton(arm)
 
-    # OMSI animates from a T-pose; Rocketbox ships an A-pose.
+    def bone(role, side="R"):
+        return bones[role].format(S=side, s=side.lower())
+
+    # OMSI animates from a T-pose; Rocketbox and MakeHuman ship an A-pose.
     for side, x in (("L", 1.0), ("R", -1.0)):
         out = Vector((x, 0.0, 0.0))
-        aim(arm, f"{bip} {side} UpperArm", f"{bip} {side} Forearm", out)
-        aim(arm, f"{bip} {side} Forearm", f"{bip} {side} Hand", out)
-        aim(arm, f"{bip} {side} Hand", f"{bip} {side} Finger2", out)
+        aim(arm, bone("upperarm", side), bone("forearm", side), out)
+        aim(arm, bone("forearm", side), bone("hand", side), out)
+        aim(arm, bone("hand", side), bone("finger", side), out)
 
     mats, textures = [], {}
-    verts, tris, weights, hand_r = bake(arm, meshes, mats, textures)
-    levels = [(f"{prefix}.o3d", verts, tris, weights)]
-    for suffix, ratio in LODS:
-        v, t, w, _ = bake(arm, [decimated(ob, ratio) for ob in meshes], mats, textures)
+    full = sum(len(p.vertices) - 2 for o in meshes for p in o.data.polygons)
+    levels, hand_r = [], []
+    for suffix, most in LODS:
+        ratio = min(1.0, most / max(full, 1))
+        v, t, w, hands = bake(arm, [decimated(o, ratio) for o in meshes], mats, textures)
+        hand_r = hand_r or hands
         levels.append((f"{prefix}{suffix}.o3d", v, t, w))
 
     a = arm.matrix_world
 
-    def joint(bone):
-        return to_omsi(a @ arm.pose.bones[bone].head)
+    def joint(role):
+        return to_omsi(a @ arm.pose.bones[bone(role)].head)
 
-    hip = joint(f"{bip} R Thigh")
-    knee = joint(f"{bip} R Calf")
-    waist = joint(f"{bip} Spine1")
-    shoulder = joint(f"{bip} R UpperArm")
-    elbow = joint(f"{bip} R Forearm")
-    neck = joint(f"{bip} Head")
-    hand = joint(f"{bip} R Hand")
+    hip, knee, waist = joint("thigh"), joint("calf"), joint("waist")
+    shoulder, elbow, neck, hand = joint("upperarm"), joint("forearm"), joint("head"), joint("hand")
     finger = Vector((max(p.x for p in hand_r), hand.y, hand.z)) if hand_r else hand
     links = [hip.x, hip.y, hip.z, knee.x, knee.y, knee.z, waist.y, waist.z,
              shoulder.x, shoulder.y, shoulder.z, elbow.x, elbow.y, elbow.z, neck.y, neck.z,
              hand.x, hand.y, hand.z, finger.x, finger.y, finger.z]
-    height = max(v[1] for v in verts)
+    height = max(v[1] for v in levels[0][1])
 
     for path, v, t, w in levels:
         write_o3d(path, v, t, mats, textures, w)
