@@ -104,6 +104,9 @@ pub struct Settings {
     pub units: String,
     /// What passengers say: `all`, `tickets` (only what they ask for) or `off`.
     pub pax_voices: String,
+    /// Which people the passengers are: `omsi` (the installation's) or `realistic` (the
+    /// RealisticPax pack in the content folder's `Packs`, laid over them).
+    pub pax_models: String,
     /// OMSI 2's route arrows over the road (as well as or instead of the navigator).
     pub nav_arrows: bool,
     /// The other (AI) vehicles as dots on the navigator's and the city map.
@@ -351,6 +354,7 @@ impl Settings {
             language: "ENG".into(),
             units: "metric".into(),
             pax_voices: "all".into(),
+            pax_models: "omsi".into(),
             nav_arrows: false,
             nav_ai: true,
             nav_topbar: true,
@@ -577,6 +581,12 @@ impl Settings {
                         "tickets" => "tickets".into(),
                         "off" | "0" | "none" => "off".into(),
                         _ => "all".into(),
+                    }
+                }
+                "pax_models" => {
+                    s.pax_models = match v.to_ascii_lowercase().as_str() {
+                        "realistic" => "realistic".into(),
+                        _ => "omsi".into(),
                     }
                 }
                 "nav_arrows" => s.nav_arrows = b(v),
@@ -990,6 +1000,7 @@ impl Settings {
             self.units, self.discord_status as u8, self.discord_app_id
         ));
         text.push_str(&format!("auto_shift={}\n", self.auto_shift as u8));
+        text.push_str(&format!("pax_models={}\n", self.pax_models));
         text
     }
 
@@ -1244,6 +1255,18 @@ mod tests {
             0.5
         );
         assert_eq!(Settings::from_text("ui_opacity=7\n").ui_opacity, 1.0);
+    }
+
+    #[test]
+    fn pax_models_default_to_omsi_and_round_trip() {
+        assert_eq!(Settings::default().pax_models, "omsi");
+        assert_eq!(Settings::from_text("pax_models=Realistic\n").pax_models, "realistic");
+        assert_eq!(Settings::from_text("pax_models=other\n").pax_models, "omsi");
+        let s = Settings {
+            pax_models: "realistic".into(),
+            ..Default::default()
+        };
+        assert_eq!(Settings::from_text(&s.to_text()), s);
     }
 
     #[test]

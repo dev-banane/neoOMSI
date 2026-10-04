@@ -44,6 +44,19 @@ fn report(t: &HumanType) {
         t.def.walk_param
     );
     println!(
+        "   levels {:?}: vertices {}",
+        t.levels,
+        (0..t.levels.len())
+            .map(|l| (0..t.mesh_count())
+                .map(|k| t.mesh_at(k))
+                .filter(|(lv, _)| *lv == l)
+                .map(|(_, m)| m.data.positions.len())
+                .sum::<usize>()
+                .to_string())
+            .collect::<Vec<_>>()
+            .join(" / ")
+    );
+    println!(
         "   links hip {:?} knee {:?} waist {:?} shoulder {:?} elbow {:?} neck {:?} hand {:?} finger {:?}",
         j.hip, j.knee, j.waist, j.shoulder, j.elbow, j.neck, j.hand, j.finger
     );

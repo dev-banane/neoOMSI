@@ -2420,6 +2420,7 @@ pub fn settings_from_text(text: Option<&str>) -> Value {
     // neoOMSI's own: what passengers say, OMSI's route arrows, getting up from the seat
     for (k, d) in [
         ("pax_voices", json!("all")),
+        ("pax_models", json!("omsi")),
         ("nav_arrows", json!(false)),
         ("nav_ai", json!(true)),
         ("nav_topbar", json!(true)),
@@ -2588,7 +2589,8 @@ pub fn settings_from_text(text: Option<&str>) -> Value {
             "ai_max_parked" => {
                 v[&k] = json!(val.parse::<f64>().map(|x| x.max(-1.0) as i64).unwrap_or(0))
             }
-            "drive_keys" | "navigator_corner" | "boarding" | "render_scale" | "pax_voices" => {
+            "drive_keys" | "navigator_corner" | "boarding" | "render_scale" | "pax_voices"
+            | "pax_models" => {
                 v[&k] = json!(val)
             }
             "units" => {
@@ -3215,6 +3217,13 @@ pub fn settings_to_text(v: &Value, old: Option<&str>) -> String {
         )
     ));
     text.push_str(&format!("look_sens={}\nsteer_look_angle={}\nsteer_look_response={}\ntime_sync={}\nmetar_sync={}\nmetar_station={}\n", f("look_sens", 1.0).clamp(0.1, 2.0), f("steer_look_angle", 30.0).clamp(0.0, 60.0), f("steer_look_response", 0.25).clamp(0.05, 1.0), b("time_sync", false), b("metar_sync", false), v.get("metar_station").and_then(|x| x.as_str()).unwrap_or("").chars().filter(|c| c.is_ascii_alphabetic()).take(4).collect::<String>().to_ascii_uppercase()));
+    text.push_str(&format!(
+        "pax_models={}\n",
+        match v.get("pax_models").and_then(|x| x.as_str()) {
+            Some("realistic") => "realistic",
+            _ => "omsi",
+        }
+    ));
     let written: Vec<String> = text
         .lines()
         .filter_map(|l| l.split_once('='))

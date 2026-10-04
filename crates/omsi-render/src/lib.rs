@@ -1122,11 +1122,9 @@ pub struct Renderer {
     /// main/mirror picture. Keep these separate from simulation's worker queue.
     encoding_pool: Option<rayon::ThreadPool>,
     _device_poller: Option<DevicePoller>,
-    /// Vertex data of changed meshes (skinned people, the driver) waiting for the next
-    /// picture: (mesh, bytes). Written with one staging buffer and a copy each at the start
-    /// of the frame - a `write_buffer` per mesh made wgpu create a staging buffer for every
-    /// one of them, forty a frame with a crowd at a stop.
-    pending_meshes: std::cell::RefCell<Vec<(MeshId, Vec<u8>)>>,
+    /// Vertices of changed meshes (skinned people, the driver) waiting for the next
+    /// picture, written mesh by mesh at the start of the frame.
+    pending_meshes: std::cell::RefCell<Vec<(MeshId, Vec<Vertex>)>>,
     /// What a freed mesh and a freed material hold (see `free_mesh`), made once.
     freed: std::cell::OnceCell<Freed>,
 }
@@ -4065,33 +4063,29 @@ impl Renderer {
         normals: &[Vec3],
         uvs: &[glam::Vec2],
     ) {
-        let verts: Vec<Vertex> = positions
-            .iter()
-            .zip(normals)
-            .zip(uvs)
-            .map(|((p, n), uv)| Vertex {
-                pos: p.to_array(),
-                normal: n.to_array(),
-                uv: uv.to_array(),
-            })
-            .collect();
-        let bytes: &[u8] = bytemuck::cast_slice(&verts);
         let m = &mut scene.meshes[id];
-        if (m.vertex_buf.size() as usize) < bytes.len() {
+        let n = positions.len().min(normals.len()).min(uvs.len());
+        if (m.vertex_buf.size() as usize) < n * std::mem::size_of::<Vertex>() {
             return;
+        }
+        let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+        let mut verts: Vec<Vertex> = Vec::with_capacity(n);
+        for ((p, nrm), uv) in positions.iter().zip(normals).zip(uvs) {
+            lo = lo.min(*p);
+            hi = hi.max(*p);
+            verts.push(Vertex {
+                pos: p.to_array(),
+                normal: nrm.to_array(),
+                uv: uv.to_array(),
+            });
         }
         {
             // (a newer pose of the same mesh replaces one still waiting)
             let mut pending = self.pending_meshes.borrow_mut();
             match pending.iter_mut().find(|(mid, _)| *mid == id) {
-                Some(e) => e.1 = bytes.to_vec(),
-                None => pending.push((id, bytes.to_vec())),
+                Some(e) => e.1 = verts,
+                None => pending.push((id, verts)),
             }
-        }
-        let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
-        for p in positions {
-            lo = lo.min(*p);
-            hi = hi.max(*p);
         }
         if !positions.is_empty() {
             m.bounds_center = (lo + hi) * 0.5;
@@ -4106,10 +4100,11 @@ impl Renderer {
     /// creation failed validation and mapping it panicked (Windows, Vulkan).
     fn flush_pending_meshes(&self, scene: &Scene, _encoder: &mut wgpu::CommandEncoder) {
         let pending = std::mem::take(&mut *self.pending_meshes.borrow_mut());
-        for (id, b) in &pending {
+        for (id, verts) in &pending {
             let Some(m) = scene.meshes.get(*id) else {
                 continue;
             };
+            let b: &[u8] = bytemuck::cast_slice(verts);
             let len = (b.len() as u64) / 4 * 4;
             if len == 0 || m.vertex_buf.size() < len {
                 continue;

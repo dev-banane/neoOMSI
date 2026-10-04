@@ -1878,6 +1878,16 @@ fn gameplay_tab(ui: &mut Ui, s: &mut Value, dirty: &mut f32, cols: [Rect; 2]) ->
         s["pax_density"] = json!((pd * 100.0).round() / 100.0);
         *dirty = 0.3;
     }
+    sel_setting(
+        ui,
+        s,
+        dirty,
+        "s-paxmodels",
+        c.row(),
+        "Passenger models (next start)",
+        "pax_models",
+        &[("omsi", "OMSI 2"), ("realistic", "Realistic")],
+    );
     c.section(ui, "Traffic");
     sel_setting(
         ui,
@@ -5048,6 +5058,7 @@ mod settings_tests {
             "s-board",
             "set-exact_fare",
             "s-pax",
+            "s-paxmodels",
             "s-unsched",
             "s-maxsched",
             "s-maxpark",

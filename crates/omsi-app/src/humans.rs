@@ -95,6 +95,7 @@ pub struct Eye {
     pub fwd: DVec3,
     /// Cosine of half the diagonal field of view, with a margin.
     pub cos_half: f64,
+    pub fov_y: f64,
 }
 
 impl Eye {
@@ -107,6 +108,7 @@ impl Eye {
             cos_half: (half_diag + 10f64.to_radians())
                 .min(89f64.to_radians())
                 .cos(),
+            fov_y: (cam.fov_deg as f64).to_radians().max(1e-3),
         }
     }
 }
@@ -1258,11 +1260,13 @@ pub struct Person {
     t_state: f32,
     /// Skinned positions and normals, per mesh.
     skins: Vec<(Vec<Vec3>, Vec<Vec3>)>,
-    /// The bones the skins were made with, and whether this frame's pose changed them
-    /// (somebody standing still keeps the mesh of the frame before: skinning and uploading
-    /// thirty waiting people every frame took 2 ms of the frame at a bus station).
+    /// The bones the skins were made with, the levels (bit per `[LOD]` level) whose skins
+    /// were made with them, and the levels this frame's pose skinned anew (somebody
+    /// standing still keeps the mesh of the frame before: skinning and uploading thirty
+    /// waiting people every frame took 2 ms of the frame at a bus station).
     skin_bones: Option<[glam::Affine3A; omsi_sim::human::SLOTS]>,
-    pose_changed: bool,
+    fresh_levels: u32,
+    changed_levels: u32,
     /// Interior light of the bus the person is in (0 outside).
     interior: f32,
     /// The interior light as drawn: it follows `interior` over a moment (stepping through
@@ -1366,6 +1370,10 @@ const CHAT_PAUSE: f64 = 12.0;
 
 pub struct Humans {
     types: Vec<Arc<HumanType>>,
+    /// Other figures for a type's place (`Humans/<group>/<name>~<other>.hum`, keyed by
+    /// [`slot_key`] of `<group>/<name>.hum`): one of them or the type itself is drawn
+    /// whenever the type is, so they add faces without changing who a map's list asks for.
+    alternates: HashMap<String, Vec<Arc<HumanType>>>,
     pub people: Vec<Person>,
     rng: u64,
     next_id: u32,
@@ -1555,6 +1563,26 @@ pub struct Humans {
 
 /// Resolve each map entry directly, including human packs with nested folders.
 /// Keep duplicate entries as spawn weights, but load each definition only once.
+fn is_alternate(path: &Path) -> bool {
+    path.file_stem()
+        .is_some_and(|s| s.to_string_lossy().contains('~'))
+}
+
+/// `<group>/<name>.hum` of a type or of an alternate of it, lowercase.
+fn slot_key(path: &Path) -> String {
+    let group = path
+        .parent()
+        .and_then(|d| d.file_name())
+        .map(|n| n.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    let stem = path
+        .file_stem()
+        .map(|n| n.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    let base = stem.split('~').next().unwrap_or_default();
+    format!("{group}/{base}.hum")
+}
+
 fn map_human_types(root: &Path, list: &[String]) -> Vec<Arc<HumanType>> {
     // (keyed case-blind: OMSI paths are, and the lists spell one file several ways)
     let mut loaded: HashMap<String, Option<Arc<HumanType>>> = HashMap::new();
@@ -1626,13 +1654,21 @@ impl Humans {
         }
         found.sort();
         let files: Vec<std::path::PathBuf> = found.into_iter().map(|(_, _, p)| p).collect();
+        let mut alternates: HashMap<String, Vec<Arc<HumanType>>> = HashMap::new();
         for f in files {
             match HumanType::load(&f) {
+                Ok(t) if is_alternate(&f) => {
+                    alternates.entry(slot_key(&f)).or_default().push(Arc::new(t))
+                }
                 Ok(t) => types.push(Arc::new(t)),
                 Err(e) => log::warn!("human {}: {e:#}", f.display()),
             }
         }
-        log::info!("humans: {} types", types.len());
+        log::info!(
+            "humans: {} types, {} alternates",
+            types.len(),
+            alternates.values().map(Vec::len).sum::<usize>()
+        );
         if omsi_cfg::env::var_os("OMSI_DEBUG_HUMANS").is_some() {
             for t in &types {
                 let (mut lo, mut hi) = (f32::MAX, f32::MIN);
@@ -1650,6 +1686,7 @@ impl Humans {
         }
         Humans {
             types,
+            alternates,
             people: Vec::new(),
             rng: 0x1234_5678_9ABC_DEF1,
             next_id: 1,
@@ -2115,12 +2152,24 @@ impl Humans {
             .filter(|q| (q.position - position).truncate().length() < 30.0)
             .map(|q| (Arc::as_ptr(&q.ty) as usize, q.variant))
             .collect();
-        let mut choice: Option<(usize, usize)> = None;
+        let mut choice: Option<(Arc<HumanType>, usize)> = None;
         for attempt in 0..10 {
             let pick = (self.rand() % self.types.len() as u64) as usize;
             let idx = kind.map(|k| k % self.types.len()).unwrap_or(pick);
-            let t = &self.types[idx];
-            let tk = Arc::as_ptr(t) as usize;
+            let mut t = self.types[idx].clone();
+            if let (None, Some(alts)) = (kind, self.alternates.get(&slot_key(&t.def.path))) {
+                let weight = |t: &HumanType| t.def.weight.unwrap_or(1.0) as f64;
+                let alts = alts.clone();
+                let mut left = self.rand_f() * (1.0 + alts.iter().map(|a| weight(a)).sum::<f64>());
+                for a in alts {
+                    left -= weight(&a);
+                    if left < 0.0 {
+                        t = a;
+                        break;
+                    }
+                }
+            }
+            let tk = Arc::as_ptr(&t) as usize;
             // the default clothes or one of the `.cti` variants, alike likely
             let n_var = t.variants.len() as u64 + 1;
             let v0 = (self.rand() % n_var) as usize;
@@ -2131,19 +2180,19 @@ impl Humans {
             let figure_free = !near.iter().any(|n| n.0 == tk);
             match var {
                 Some(v) if figure_free || attempt >= 6 || kind.is_some() => {
-                    choice = Some((idx, v));
+                    choice = Some((t, v));
                     break;
                 }
-                Some(v) if choice.is_none() => choice = Some((idx, v)),
-                None if choice.is_none() && attempt == 9 => choice = Some((idx, v0)),
+                Some(v) if choice.is_none() => choice = Some((t, v)),
+                None if choice.is_none() && attempt == 9 => choice = Some((t, v0)),
                 _ => {}
             }
         }
-        let (idx, variant) = choice.unwrap_or((0, 0));
-        let ty = self.types[idx].clone();
+        let (ty, variant) = choice.unwrap_or_else(|| (self.types[0].clone(), 0));
         let tkey = Arc::as_ptr(&ty) as usize;
         let mut meshes = Vec::new();
-        for (mi, hm) in ty.meshes.iter().enumerate() {
+        for mi in 0..ty.mesh_count() {
+            let (level, hm) = ty.mesh_at(mi);
             let key = (tkey, variant, mi);
             // somebody of this type has gone: their mesh and instance
             if let Some((id, inst)) = self.spare.get_mut(&key).and_then(|v| v.pop()) {
@@ -2197,6 +2246,11 @@ impl Humans {
             let mats = self.gpu_materials[&key].clone();
             let id = renderer.add_mesh(scene, &hm.data);
             let inst = renderer.add_instance(scene, id, position, Mat4::IDENTITY, mats);
+            if ty.levels.len() > 1 {
+                let (min, max) = ty.levels[level];
+                renderer.set_lod_range(scene, inst, min, max);
+                renderer.set_object_culling(scene, inst, ty.radius(), 1.0, false);
+            }
             meshes.push((id, inst));
         }
         // walking pace 1.1 m/s +- 0.2, as Omsi.exe draws it for everybody (0x625758:
@@ -2237,7 +2291,8 @@ impl Humans {
             t_state: 0.0,
             skins: Vec::new(),
             skin_bones: None,
-            pose_changed: false,
+            fresh_levels: 0,
+            changed_levels: 0,
             interior: 0.0,
             lit: 0.0,
             tilt: Mat4::IDENTITY,
@@ -4814,10 +4869,32 @@ impl Humans {
         let sdt = (self.time - self.last_sync).clamp(0.0, 0.5) as f32;
         self.last_sync = self.time;
         let mut due: Vec<bool> = Vec::with_capacity(self.people.len());
+        let mut wanted: Vec<u32> = Vec::with_capacity(self.people.len());
+        let fov_y = eye.map_or(1.0, |e| e.fov_y);
         for (k, p) in self.people.iter_mut().enumerate() {
             p.since_posed = p.since_posed.saturating_add(1);
             let d = p.position + DVec3::Z * 0.9 - from;
             let dist = d.length();
+            let want = if p.ty.levels.len() > 1 {
+                let r = p.ty.radius() as f64;
+                let od = (p.position - from).length();
+                let size = if od <= r {
+                    f32::MAX
+                } else {
+                    (2.0 * r / (od * fov_y)) as f32
+                };
+                let want = p.ty.levels_at(size);
+                // (a mirror measures its own size and may draw a finer level: near enough
+                // for one to show them, the finer levels are kept posed as well)
+                if dist < 30.0 {
+                    want | ((want & want.wrapping_neg()) - 1)
+                } else {
+                    want
+                }
+            } else {
+                1
+            };
+            wanted.push(want);
             let visible = match eye {
                 Some(e) => dist < 4.0 || d.dot(e.fwd) / dist.max(1e-3) > e.cos_half - 0.15,
                 None => true,
@@ -4849,63 +4926,70 @@ impl Humans {
             due.push(
                 !p.skinned
                     || all
+                    || want & !p.fresh_levels != 0
                     || (p.since_posed >= every && (turn || p.since_posed >= 2 * every)),
             );
         }
         let n_due = due.iter().filter(|d| **d).count();
-        let pose_one = |p: &mut Person| {
+        let pose_one = |p: &mut Person, want: u32| {
             let Person {
                 anim,
                 ty,
                 skins,
                 skin_bones,
-                pose_changed,
+                fresh_levels,
+                changed_levels,
                 ..
             } = p;
-            *pose_changed = false;
+            *changed_levels = 0;
             let bones = omsi_sim::human::slots_from_omsi(&anim.bones(&ty.omsi));
             if bones.iter().any(|b| !b.is_finite()) && !skins.is_empty() {
                 // keep the last good mesh (the rest pose would be the file's T-pose)
                 return;
             }
-            // (the same bones as the mesh was made with: nothing to skin or upload)
-            if skins.len() == ty.meshes.len()
+            // (the same bones as the mesh was made with: only the levels not skinned yet)
+            let same = skins.len() == ty.mesh_count()
                 && skin_bones
                     .as_ref()
-                    .is_some_and(|b| b.iter().zip(&bones).all(|(a, c)| a.abs_diff_eq(*c, 1e-6)))
-            {
+                    .is_some_and(|b| b.iter().zip(&bones).all(|(a, c)| a.abs_diff_eq(*c, 1e-6)));
+            let todo = if same { want & !*fresh_levels } else { want };
+            if todo == 0 {
                 return;
             }
-            skins.resize_with(ty.meshes.len(), Default::default);
-            for (k, m) in ty.meshes.iter().enumerate() {
-                let (pos, nrm) = &mut skins[k];
-                skin(m, &bones, pos, nrm);
+            skins.resize_with(ty.mesh_count(), Default::default);
+            for (k, skinned) in skins.iter_mut().enumerate() {
+                let (level, m) = ty.mesh_at(k);
+                if todo & (1 << level) != 0 {
+                    skin(m, &bones, &mut skinned.0, &mut skinned.1);
+                }
             }
+            *fresh_levels = if same { *fresh_levels | todo } else { todo };
             *skin_bones = Some(bones);
-            *pose_changed = true;
+            *changed_levels = todo;
         };
         // a handful is quicker on this thread than handed to the pool
         if n_due >= 8 {
             self.people
                 .par_iter_mut()
-                .zip(due.par_iter())
+                .zip(due.par_iter().zip(wanted.par_iter()))
                 .with_min_len(2)
-                .filter(|(_, go)| **go)
-                .for_each(|(p, _)| pose_one(p));
+                .filter(|(_, (go, _))| **go)
+                .for_each(|(p, (_, want))| pose_one(p, *want));
         } else {
             self.people
                 .iter_mut()
-                .zip(&due)
-                .filter(|(_, go)| **go)
-                .for_each(|(p, _)| pose_one(p));
+                .zip(due.iter().zip(&wanted))
+                .filter(|(_, (go, _))| **go)
+                .for_each(|(p, (_, want))| pose_one(p, *want));
         }
         let upload = std::time::Instant::now();
         for (p, &go) in self.people.iter_mut().zip(&due) {
             if go {
-                if p.pose_changed || !p.skinned {
-                    for (k, (id, _)) in p.meshes.iter().enumerate() {
+                for (k, (id, _)) in p.meshes.iter().enumerate() {
+                    let (level, m) = p.ty.mesh_at(k);
+                    if p.changed_levels & (1 << level) != 0 {
                         if let Some((pos, nrm)) = p.skins.get(k) {
-                            renderer.update_mesh(scene, *id, pos, nrm, &p.ty.meshes[k].data.uvs);
+                            renderer.update_mesh(scene, *id, pos, nrm, &m.data.uvs);
                         }
                     }
                 }
@@ -5816,16 +5900,32 @@ impl Humans {
     }
 
     /// The human type of a file relative to a content root (`Humans/…/x.hum`).
-    pub fn type_by_file(&self, file: &str) -> Option<usize> {
+    pub fn type_by_file(&mut self, file: &str) -> Option<usize> {
         let want = file.replace('\\', "/").to_ascii_lowercase();
-        self.types.iter().position(|t| {
+        let is = |t: &Arc<HumanType>, want: &str| {
             t.def
                 .path
                 .to_string_lossy()
                 .replace('\\', "/")
                 .to_ascii_lowercase()
-                .ends_with(&want)
-        })
+                .ends_with(want)
+        };
+        if let Some(i) = self.types.iter().position(|t| is(t, &want)) {
+            return Some(i);
+        }
+        // the host drew an alternate: that figure if it is here too, else the one it stands for
+        let alt = self
+            .alternates
+            .get(&slot_key(Path::new(&want)))
+            .and_then(|v| v.iter().find(|t| is(t, &want)).cloned());
+        match alt {
+            Some(t) => Some(self.type_index(t)),
+            None if is_alternate(Path::new(&want)) => {
+                let base = slot_key(Path::new(&want));
+                self.types.iter().position(|t| is(t, &base))
+            }
+            None => None,
+        }
     }
 
     /// The file of a human type relative to its content root (`Humans/…/x.hum`).
@@ -6011,6 +6111,15 @@ impl Humans {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn alternates_share_the_place_of_their_type() {
+        let alt = Path::new("C:/x/Humans/Other/Man01~Business_Male_01.hum");
+        assert!(is_alternate(alt));
+        assert!(!is_alternate(Path::new("C:/x/Humans/Other/man01.hum")));
+        assert_eq!(slot_key(alt), "other/man01.hum");
+        assert_eq!(slot_key(Path::new("Humans/Other/man01.hum")), "other/man01.hum");
+    }
 
     #[test]
     fn map_humans_load_nested_paths_and_preserve_weights() {

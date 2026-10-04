@@ -306,6 +306,18 @@ pub(crate) fn prepare(
             }
             Err(e) => log::warn!("content folder {}: {e}", c.display()),
         }
+        if settings::Settings::load().pax_models == "realistic" {
+            let pack = c.join("Packs").join("RealisticPax");
+            if pack.join("Humans").is_dir() {
+                omsi_cfg::add_content_root(pack.clone());
+                log::info!("realistic passengers: {}", pack.display());
+            } else {
+                log::warn!(
+                    "realistic passengers chosen but {} is missing: OMSI's people instead",
+                    pack.display()
+                );
+            }
+        }
     }
     // archives read in place: searched after the content folder, before the installation
     // (`--content-zip`, `OMSI_CONTENT_ZIP`, and every .zip in the content folder's `Archives`)

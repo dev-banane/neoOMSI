@@ -380,7 +380,12 @@ pub struct HumanType {
     pub omsi: crate::human_omsi::OmsiRig,
     pub model: Model,
     pub model_dir: PathBuf,
+    /// The most detailed level's meshes (the rig is measured from them).
     pub meshes: Vec<HumanMesh>,
+    /// Per `[LOD]` level, most detailed first: the screen sizes it is drawn at, `min..max`.
+    pub levels: Vec<(f32, f32)>,
+    /// The meshes of the levels after the first, with their level.
+    pub lower: Vec<(usize, HumanMesh)>,
     pub joints: Joints,
     pub rig: Rig,
     /// Clothing variants: the `[item]`s of the `.cti` files in the model's `[CTC]` folder
@@ -403,9 +408,9 @@ impl HumanType {
             .parent()
             .map(|p| p.to_path_buf())
             .unwrap_or_default();
-        let mut meshes = Vec::new();
-        if !model.lods.is_empty() {
-            for md in model.lod_meshes(0) {
+        let load_level = |level: usize| -> Result<Vec<HumanMesh>> {
+            let mut meshes = Vec::new();
+            for md in model.lod_meshes(level) {
                 let p = omsi_cfg::resolve_path(&model_dir, &md.file);
                 let m =
                     omsi_o3d::load_mesh(&p).with_context(|| format!("loading {}", p.display()))?;
@@ -452,11 +457,44 @@ impl HumanType {
                     alpha,
                 });
             }
+            Ok(meshes)
+        };
+        let mut order: Vec<usize> = (0..model.lods.len()).collect();
+        order.sort_by(|a, b| model.lods[*b].min_size.total_cmp(&model.lods[*a].min_size));
+        let mut meshes = match order.first() {
+            Some(&l) => load_level(l)?,
+            None => Vec::new(),
+        };
+        let mut levels = vec![(order.first().map_or(0.0, |&l| model.lods[l].min_size), f32::MAX)];
+        let mut lower = Vec::new();
+        for &l in order.iter().skip(1) {
+            let min = model.lods[l].min_size;
+            let posable = match load_level(l) {
+                Ok(ms) => Some(ms).filter(|ms| {
+                    !ms.is_empty()
+                        && ms.iter().all(|m| m.bones.iter().any(|(id, _)| slot_of(*id).is_some()))
+                }),
+                Err(e) => {
+                    log::warn!("{}: LOD {l}: {e:#}", path.display());
+                    None
+                }
+            };
+            // a level that cannot be posed is left out: the one above it reaches down instead
+            let Some(ms) = posable else {
+                levels.last_mut().unwrap().0 = min;
+                continue;
+            };
+            let above = levels.last().unwrap().0;
+            levels.push((min, above));
+            lower.extend(ms.into_iter().map(|m| (levels.len() - 1, m)));
         }
+        // (the people were never left out by their size before the levels were used: the
+        // least detailed one is drawn however small, the crowd's own culling decides)
+        levels.last_mut().unwrap().0 = 0.0;
         let mut joints = Joints::from_links(&def.links);
         fit_leg_joints(&mut joints, &meshes, path);
         let rig = Rig::measure(&def, &joints, &meshes);
-        for m in meshes.iter_mut() {
+        for m in meshes.iter_mut().chain(lower.iter_mut().map(|(_, m)| m)) {
             split_feet(m, &rig);
         }
         // The `[CTC]` folder is relative to the .hum file's folder (`Texture\man02` is
@@ -504,9 +542,47 @@ impl HumanType {
             model,
             model_dir,
             meshes,
+            levels,
+            lower,
             variants,
             extra_dirs,
         })
+    }
+
+    /// The meshes of every level: the first level's, then the rest.
+    pub fn mesh_count(&self) -> usize {
+        self.meshes.len() + self.lower.len()
+    }
+
+    /// Mesh `k` of [`HumanType::mesh_count`] and its level.
+    pub fn mesh_at(&self, k: usize) -> (usize, &HumanMesh) {
+        match self.meshes.get(k) {
+            Some(m) => (0, m),
+            None => {
+                let (level, m) = &self.lower[k - self.meshes.len()];
+                (*level, m)
+            }
+        }
+    }
+
+    /// The sphere about the feet that holds the whole person, for the screen size the
+    /// levels are chosen by.
+    pub fn radius(&self) -> f32 {
+        self.rig.head_top.max(0.5)
+    }
+
+    /// The levels (bit per level) that may be drawn at screen size `size`: the renderer
+    /// holds an object's size while it changes less than 6 %, so the neighbouring level
+    /// is included near a boundary.
+    pub fn levels_at(&self, size: f32) -> u32 {
+        let (lo, hi) = (size * 0.9, if size >= f32::MAX / 2.0 { size } else { size * 1.1 });
+        let mut mask = 0;
+        for (l, &(min, max)) in self.levels.iter().enumerate().take(32) {
+            if hi >= min && lo < max {
+                mask |= 1 << l;
+            }
+        }
+        if mask == 0 { 1 } else { mask }
     }
 
     pub fn texture_dirs(&self, root: &Path) -> Vec<PathBuf> {
