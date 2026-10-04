@@ -1108,7 +1108,7 @@ fn graphics_tab(ui: &mut Ui, s: &mut Value, dirty: &mut f32, cols: [Rect; 2]) ->
         s,
         dirty,
         c.row(),
-        "OMSI's shadow meshes (under vehicles)",
+        "Shadow patches under vehicles and people",
         "shadow_blobs",
     );
     toggle_setting(

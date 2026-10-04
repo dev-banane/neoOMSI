@@ -18,7 +18,8 @@ pub struct Settings {
     pub shadow_size: u32,
     /// Draw the models' `[isshadow]` shadow meshes: OMSI's flat blob under a vehicle,
     /// standing in for the sky light the body keeps off the road. Off, only the sun shadow
-    /// map shades under a vehicle (the blob is a fake OMSI draws whatever the depth).
+    /// map shades under a vehicle (the blob is a fake OMSI draws whatever the depth). Also
+    /// the soft patch under each passenger.
     pub shadow_blobs: bool,
     /// The route navigator in the lower right corner.
     pub navigator: bool,

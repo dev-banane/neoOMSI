@@ -321,6 +321,43 @@ def build_figure(args, blender, stock, hum_out, source, weight, person=None):
     return f"{hum_out.relative_to(args.out)} <- {source}: {tris} triangles, {info['height']} m"
 
 
+MAKEHUMAN_LICENSE = """\
+The people under generated/ are made with MakeHuman's MPFB from MakeHuman's base mesh,
+targets and system assets (skins, eyes, eyebrows, hair, clothes, shoes), which their
+copyright holders released into the public domain under CC0 1.0 Universal:
+https://creativecommons.org/publicdomain/zero/1.0/
+
+The copyright holders at the point of the release to CC0 were:
+Copyright (C) 2020 Data Collection AB, https://www.datacollection.se
+Copyright (C) 2020 Joel Palmius
+Copyright (C) 2020 Jonas Hauquier
+
+MakeHuman: http://www.makehumancommunity.org
+MPFB (GPL-3.0-or-later) only ran in Blender to make the models; none of it is in this pack.
+"""
+
+PACK_README = """\
+Realistic passengers for neoOMSI, built with tools/realistic-pax of the neoOMSI sources.
+
+- rocketbox/: the Microsoft Rocketbox avatars
+  (https://github.com/microsoft/Microsoft-Rocketbox), MIT licence, see LICENSE-Rocketbox.md.
+- generated/: people made with MakeHuman's MPFB from CC0 assets, see LICENSE-MakeHuman.txt.
+- The .hum files are the OMSI 2 installation's own passenger files with the body, age and
+  voice changed: each <name>.hum replaces the stock passenger of the same name, the
+  <name>~<other>.hum files are drawn in its place now and then.
+
+Because the .hum files come from your OMSI 2 installation, the pack is for your own use:
+do not pass it on.
+"""
+
+
+def write_pack_notes(out, generated):
+    shutil.copy(CACHE / "LICENSE.md", out / "LICENSE-Rocketbox.md")
+    if generated:
+        (out / "LICENSE-MakeHuman.txt").write_text(MAKEHUMAN_LICENSE)
+    (out / "README.txt").write_text(PACK_README)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--omsi", required=True, type=pathlib.Path)
@@ -360,6 +397,7 @@ def main():
     if args.hums_only:
         for stock, out, source, weight, *person in work:
             print(rewrite_hum(stock, out, source, weight, person[0] if person else None))
+        write_pack_notes(args.out, bool(pax.get("generated")))
         return
     failed = False
     with concurrent.futures.ThreadPoolExecutor(args.jobs) as pool:
@@ -371,12 +409,7 @@ def main():
                 print(e, flush=True)
                 failed = True
 
-    shutil.copy(CACHE / "LICENSE.md", args.out / "LICENSE-Rocketbox.md")
-    (args.out / "README.txt").write_text(
-        "Realistic passengers for neoOMSI, made from the Microsoft Rocketbox avatars\n"
-        "(https://github.com/microsoft/Microsoft-Rocketbox, MIT licence, see LICENSE-Rocketbox.md).\n"
-        "Each <name>.hum replaces the stock OMSI 2 passenger of the same name; the\n"
-        "<name>~<other>.hum files are drawn in its place now and then.\n")
+    write_pack_notes(args.out, bool(pax.get("generated")))
     print(f"pack written to {args.out}")
     if failed:
         sys.exit(1)

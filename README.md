@@ -74,5 +74,6 @@ Join our [Discord server](https://discord.gg/Gk7EngX6JK) for questions, discussi
 - **Documentation:** Licensed under [Creative Commons Attribution-ShareAlike 4.0](docs/LICENSE).
 - **Brand & logos:** Protected visual identity; see [TRADEMARKS.md](TRADEMARKS.md).
 - **Attribution:** Portions derived from openOMSI; see [NOTICE](NOTICE).
+- **Optional passenger pack:** [tools/realistic-pax](tools/realistic-pax/README.md) builds it locally from Microsoft Rocketbox (MIT) and MakeHuman (CC0) assets; none of them ship with neoOMSI. See [NOTICE](NOTICE).
 
 OMSI and OMSI 2 are trademarks of their respective owners. neoOMSI is an independent project and is not affiliated with or endorsed by the original creators.

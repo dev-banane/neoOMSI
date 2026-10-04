@@ -33,8 +33,25 @@ python tools/realistic-pax/build.py --omsi "C:/Steam/steamapps/common/OMSI 2"
 ```
 
 `fetch.py` downloads about 3.5 GB into `.cache/` and installs MPFB into a Blender profile of
-its own there. After a change to `weights` or the voices, `build.py --hums-only` rewrites just
-the `.hum` files of the pack already built, without Blender. `build.py` writes the pack to `build/RealisticPax` (or `--out`). Copy that
-folder to `<content folder>/Packs/RealisticPax` and choose Settings → Gameplay → Passenger
-models → Realistic in the launcher; the change applies on the next start. With the pack
-missing or the setting on OMSI 2, the stock passengers are used.
+its own there. `build.py` writes the pack to `build/RealisticPax` (or `--out`); after a change
+to `weights` or the voices, `build.py --hums-only` rewrites just the `.hum` files of a pack
+built before, without Blender. Copy the folder to `<content folder>/Packs/RealisticPax` and
+choose Settings → Gameplay → Passenger models → Realistic in the launcher; the change applies
+on the next start. With the pack missing or the setting on OMSI 2, the stock passengers are
+used.
+
+## Licences
+
+Nothing of the avatars is in the neoOMSI repository or its releases: `fetch.py` downloads
+them and the pack is built on your machine.
+
+| Source | Licence | In the pack |
+| --- | --- | --- |
+| [Microsoft Rocketbox](https://github.com/microsoft/Microsoft-Rocketbox) avatars | MIT | `rocketbox/`, `LICENSE-Rocketbox.md` |
+| MakeHuman base mesh, targets and system assets ([MakeHuman](http://www.makehumancommunity.org)) | CC0 1.0 | `generated/`, `LICENSE-MakeHuman.txt` |
+| [MPFB](https://static.makehumancommunity.org/mpfb/) Blender add-on | GPL-3.0-or-later | nothing: it only runs in Blender while building |
+| Your OMSI 2 installation's passenger `.hum` files | OMSI 2's | every `.hum`, with body, age and voice changed |
+
+Because the `.hum` files are derived from OMSI 2's, a built pack is for your own use and must
+not be redistributed. The scripts in this folder are part of neoOMSI and GPL-3.0-or-later like
+the rest of its source.

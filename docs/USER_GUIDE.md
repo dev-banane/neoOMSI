@@ -61,6 +61,20 @@ neoomsi --map maps/Grundorf/global.cfg --bus Vehicles/MAN_SD200/MAN_SD80.bus
 | `--date <YYYY-MM-DD>` | Initial simulation date |
 | `--enhanced` | Enable enhanced physically based rendering mode |
 
+## Passengers
+
+Settings → Gameplay in the launcher has three passenger settings:
+
+| Setting | Choices | Default |
+| --- | --- | --- |
+| Passenger models | **OMSI 2**: the people of your OMSI 2 installation. **Realistic**: the RealisticPax pack (applies on the next start). | OMSI 2 |
+| Passenger movement | **Natural**: everyone walks at a pace and in a style of their own, people make room for each other, spread over the doors, run for a bus that is about to leave, look around while waiting and lean into reaching for the validator or the cash desk. **OMSI 2**: exactly as OMSI 2 animates and moves them. | Natural |
+| Passenger voices | Greetings and tickets, only the ticket asked for, or silent. | Greetings and tickets |
+
+With Passenger models and Passenger movement both on **OMSI 2**, the passengers look and move as in OMSI 2. In either case every passenger gets a soft shadow on the ground or the bus floor under them; Settings → Graphics → Shadow patches under vehicles and people switches those off together with OMSI's shadow meshes under the buses.
+
+The Realistic pack is not part of neoOMSI: it is built on your own computer from Microsoft Rocketbox and MakeHuman assets with [tools/realistic-pax](../tools/realistic-pax/README.md) and copied to `Packs/RealisticPax` in the content folder. Without it, Realistic falls back to the OMSI 2 people.
+
 ## Modding
 
 Place add-on content into the `Mods/` directory alongside the `neoomsi` executable. neoOMSI mounts add-ons into its virtual filesystem without altering original OMSI 2 files.
