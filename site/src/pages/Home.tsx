@@ -101,7 +101,7 @@ const BACKDROPS = [
 	`${SHEEN}, linear-gradient(160deg, #ff9a4d 0%, #fd6b00 40%, #c24f08 100%)`,
 	`${SHEEN}, linear-gradient(160deg, #4f86e0 0%, #2456b0 45%, #12306e 100%)`,
 	`${SHEEN}, linear-gradient(165deg, #c4a8f0 0%, #8a6ad8 45%, #46349a 100%)`,
-	`${SHEEN}, linear-gradient(340deg, #7a8ca3 0%, #4a5e7a 50%, #1f2b3d 100%)`
+	`${SHEEN}, linear-gradient(160deg, #6fd8c0 0%, #1f9c86 45%, #0c4f45 100%)`
 ];
 
 function RoadHero({ children }: { children: ReactNode }) {
@@ -247,7 +247,7 @@ export function Home() {
 						{FEATURES.map(([symbol, title, text]) => (
 							<div
 								key={title}
-								className="flex flex-col gap-3 rounded-xl bg-[color-mix(in_srgb,var(--page)_50%,var(--raised))] p-5"
+								className="card flex flex-col gap-3 p-5"
 							>
 								<span className="text-accent">
 									<Icon name={symbol} size={28} />

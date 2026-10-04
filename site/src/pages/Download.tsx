@@ -66,44 +66,42 @@ function BuildRow({
 	release?: Release | null;
 }) {
 	const file = asset(release, build);
-	const note = (
-		<span className="block text-[14.5px] leading-snug text-muted">
-			{build.note}
-			{file && `, ${megabytes(file.size)}`}
-		</span>
+	const body = (
+		<>
+			<span className="min-w-0 flex-1">
+				<span className="block font-semibold text-heading">
+					{build.arch}
+				</span>
+				<span className="block text-[14.5px] leading-snug text-muted">
+					{build.note}
+				</span>
+			</span>
+			{file ? (
+				<span className="file-get flex shrink-0 items-center gap-1.5 text-[14px] text-muted">
+					{megabytes(file.size)}
+					<Icon name="download" size={20} />
+				</span>
+			) : (
+				<span className="shrink-0 text-[13.5px] text-muted">
+					Not in this release
+				</span>
+			)}
+		</>
 	);
 	return (
-		<li className="border-t border-line first:border-t-0">
+		<li>
 			{file ? (
 				<a
-					className="group -mx-2 flex items-center gap-4 rounded-md px-2 py-3 hover:bg-sunken"
+					className="file -mx-3"
 					href={file.browser_download_url}
 					download
+					aria-label={`Download ${build.name}, ${megabytes(file.size)}`}
 				>
-					<span className="min-w-0 flex-1">
-						<span className="block font-semibold text-heading">
-							{build.arch}
-						</span>
-						{note}
-					</span>
-					<span
-						className="text-muted group-hover:text-accent"
-						aria-label="Download"
-					>
-						<Icon name="download" size={22} />
-					</span>
+					{body}
 				</a>
 			) : (
-				<div className="py-3">
-					<span className="flex items-baseline justify-between gap-3">
-						<span className="font-semibold text-heading">
-							{build.arch}
-						</span>
-						<span className="text-[13.5px] text-muted">
-							Not in this release
-						</span>
-					</span>
-					{note}
+				<div className="-mx-3 flex items-center gap-3 px-3 py-2.5">
+					{body}
 				</div>
 			)}
 		</li>
@@ -122,20 +120,19 @@ function Tiles({
 	return families(builds).map((group) => {
 		const yours = group[0].family === mine?.family;
 		return (
-			<div
-				key={group[0].family}
-				className={`rounded-xl border p-5 ${yours ? 'border-brand/55 bg-brand/[.04]' : 'border-line'}`}
-			>
+			<div key={group[0].family} className="card flex flex-col gap-3 p-5">
 				<div className="flex items-center gap-3 text-heading">
-					<PlatformIcon build={group[0].key} size={26} />
+					<span className={yours ? 'text-accent' : ''}>
+						<PlatformIcon build={group[0].key} size={26} />
+					</span>
 					<h3 className="text-[1.2rem]">{group[0].family}</h3>
 					{yours && (
-						<span className="ml-auto text-[14px] font-medium text-accent">
+						<span className="ml-auto rounded-full bg-line px-2.5 py-0.5 text-[13.5px] font-medium text-accent">
 							Your system
 						</span>
 					)}
 				</div>
-				<ul className="mt-3">
+				<ul className="space-y-1">
 					{group.map((build) => (
 						<BuildRow
 							key={build.key}
@@ -216,7 +213,7 @@ export function Download() {
 				</p>
 			</PageHead>
 
-			<div className="wrap pb-20 sm:pb-24">
+			<section className="bleed">
 				<h2 id="dl-all" className="section-title scroll-mt-24">
 					All builds
 				</h2>
@@ -224,9 +221,12 @@ export function Download() {
 					Every build plays the same maps and buses. Pick the one that
 					matches your device.
 				</p>
-				<div className="mt-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+				<div className="mt-8 grid gap-3 md:grid-cols-2">
 					<Tiles builds={PLATFORMS} release={release} mine={mine} />
 				</div>
+			</section>
+
+			<div className="wrap pb-20 sm:pb-24">
 
 				<div className="mt-24 grid grid-cols-[minmax(0,1fr)] gap-x-16 gap-y-8 lg:grid-cols-[minmax(0,1fr)_minmax(0,2fr)]">
 					<div>
@@ -239,10 +239,7 @@ export function Download() {
 						</p>
 					</div>
 					<div>
-						<div
-							role="tablist"
-							className="flex gap-1 overflow-x-auto border-b border-line"
-						>
+						<div role="tablist" className="tabs">
 							{TABS.map((t) => (
 								<button
 									key={t}
@@ -285,7 +282,7 @@ export function Download() {
 							.
 						</p>
 					</div>
-					<div className="grid gap-4 sm:grid-cols-2">
+					<div className="grid gap-3 sm:grid-cols-2">
 						<Tiles builds={SERVERS} release={release} />
 					</div>
 				</div>

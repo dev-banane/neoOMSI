@@ -106,11 +106,7 @@ const Footer = () => (
 			<p className="max-w-[38em] xl:max-w-none xl:flex-[0_1_44em]">
 				neoOMSI is an independent project, not affiliated with the
 				makers of OMSI&nbsp;2. OMSI&nbsp;2 is required to play. neoOMSI
-				started as a fork of{' '}
-				<a className="link" href={url('/openomsi/')}>
-					openOMSI
-				</a>{' '}
-				and is licensed under{' '}
+				is licensed under{' '}
 				<a
 					className="link"
 					href={`https://github.com/${REPO}/blob/main/LICENSE`}
