@@ -3,6 +3,9 @@
 /dist/
 /out/
 /_site/
+/site/dist/
+/site/dist-server/
+.wrangler/
 **/*.rs.bk
 *.pdb
 
