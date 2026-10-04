@@ -402,6 +402,7 @@ impl App {
             .unwrap_or_default();
         lighting.animation_time = Some(self.clock.run_time as f32);
         lighting.led_glow = self.settings.led_glow as f32 * 0.25;
+        crate::lights::set_led_glow(lighting.led_glow);
         lighting.led_mips = self.settings.led_mips;
         lighting.atmosphere_brightness = self.settings.atmosphere_brightness;
         let mut finish = false;

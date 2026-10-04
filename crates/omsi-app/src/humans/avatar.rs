@@ -245,8 +245,15 @@ impl Humans {
     }
 
     /// Kept within 0.3 m of the cabin's paths, on its floor and out of the seats.
-    pub fn cabin_walk(&self, bus: BusId, local: Vec3, step: glam::Vec2) -> Option<(Vec3, DVec3)> {
-        const WIDTH: f32 = 0.3;
+    /// Unless `pass`, not out through a shut door.
+    pub fn cabin_walk(
+        &self,
+        bus: BusId,
+        local: Vec3,
+        step: glam::Vec2,
+        pass: bool,
+    ) -> Option<(Vec3, DVec3)> {
+        const WIDTH: f32 = 0.5;
         let bn = self.bus_now(bus)?;
         let pts = &bn.cabin.points;
         let want = local.truncate() + step;
@@ -278,11 +285,49 @@ impl Humans {
             }
         }
         let (d, q, z) = best?;
-        let xy = if d > WIDTH {
+        let mut xy = if d > WIDTH {
             q + (want - q) / d * WIDTH
         } else {
             want
         };
+        if !pass {
+            let (eo, xo) = bn
+                .walk_open
+                .as_ref()
+                .map(|w| (&w.0, &w.1))
+                .unwrap_or((&bn.entry_open, &bn.exit_open));
+            let doors = bn
+                .cabin
+                .entries
+                .iter()
+                .enumerate()
+                .map(|(k, dr)| (dr, eo.get(k).copied().unwrap_or(false)))
+                .chain(
+                    bn.cabin
+                        .exits
+                        .iter()
+                        .enumerate()
+                        .map(|(k, dr)| (dr, xo.get(k).copied().unwrap_or(false))),
+                );
+            for (dr, open) in doors {
+                if open || (dr.inside.z - z).abs() > 0.8 {
+                    continue;
+                }
+                let p = dr.inside.truncate();
+                let out = (dr.outside.truncate() - p).normalize_or_zero();
+                if out == glam::Vec2::ZERO {
+                    continue;
+                }
+                let rel = xy - p;
+                if rel.dot(glam::Vec2::new(-out.y, out.x)).abs() > 0.9 {
+                    continue;
+                }
+                let along = rel.dot(out);
+                if along > -0.1 {
+                    xy -= out * (along + 0.1);
+                }
+            }
+        }
         // no nearer to a seat or the driver's place than 0.38 m (walking away is let be)
         let from = local.truncate();
         let solid = bn

@@ -115,6 +115,14 @@ impl Material {
 
     /// `[matl_transmap]` was given, its file there or not (the shader's
     /// `has_transmap_declared`).
+    pub fn is_screen(&self) -> bool {
+        self.uniform.flags[0] > 0.5
+    }
+
+    pub fn is_led(&self) -> bool {
+        self.uniform.emissive[3] < -1.5
+    }
+
     pub fn transmap_declared(&self) -> bool {
         (self.uniform.params2[3] + 0.5) as u32 & 2 != 0
     }

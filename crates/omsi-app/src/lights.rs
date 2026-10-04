@@ -8,8 +8,50 @@ const HEADLIGHT_INTENSITY: f32 = 22.0;
 const VANILLA_HEADLIGHT_INTENSITY: f32 = 0.2;
 const HIGH_BEAM_GAIN: f32 = 0.5;
 
+/// Per-beam tweaks for vehicle headlights (applied on top of the global lamp settings).
+#[derive(Clone, Copy)]
+pub(crate) struct BeamCfg {
+    pub on: bool,
+    /// Intensity multiplier.
+    pub gain: f32,
+    /// Range multiplier.
+    pub range: f32,
+    /// Core multiplier.
+    pub core: f32,
+    /// Cone angles added (degrees).
+    pub inner_add: f32,
+    pub outer_add: f32,
+    /// Aim added (degrees): left (positive) / up (positive).
+    pub yaw: f32,
+    pub pitch: f32,
+    /// Start shift added, metres: forward, right, up.
+    pub forward: f32,
+    pub side: f32,
+    pub height: f32,
+    pub color: [f32; 3],
+}
+
+impl BeamCfg {
+    pub(crate) const DEFAULT: Self = Self {
+        on: true,
+        gain: 1.0,
+        range: 1.0,
+        core: 1.0,
+        inner_add: 0.0,
+        outer_add: 0.0,
+        yaw: 0.0,
+        pitch: 0.0,
+        forward: 0.0,
+        side: 0.0,
+        height: 0.0,
+        color: [1.0, 1.0, 1.0],
+    };
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct LightSettings {
+    pub low: BeamCfg,
+    pub high: BeamCfg,
     pub headlight: f32,
     pub vanilla: f32,
     pub low_beam_gain: f32,
@@ -17,6 +59,28 @@ pub(crate) struct LightSettings {
     pub high_beam_range: f32,
     pub high_beam_spread: f32,
     pub force_high_beam: bool,
+    /// Fog cone start of vehicles (the yellow marker), metres: along its direction
+    /// (negative: back), to the right, up.
+    pub cone_offset: f32,
+    pub cone_side: f32,
+    pub cone_height: f32,
+    /// Headlight (the actual light, the cyan marker) start, metres, same axes.
+    pub lamp_offset: f32,
+    pub lamp_side: f32,
+    pub lamp_height: f32,
+    /// Headlight aim, degrees: turned left (positive) / up (positive) from the authored axis.
+    pub lamp_yaw: f32,
+    pub lamp_pitch: f32,
+    /// Headlight range (x authored range), core (x), left/right lamp distance (x), cone
+    /// angles (added, degrees) and colour tint.
+    pub lamp_range: f32,
+    pub lamp_core: f32,
+    pub lamp_spread: f32,
+    pub lamp_inner_add: f32,
+    pub lamp_outer_add: f32,
+    pub lamp_color: [f32; 3],
+    /// Show where the beams start (ImGui markers).
+    pub beam_marker: bool,
     pub weather_boost: f32,
     pub weather_night: f32,
     pub corona: f32,
@@ -24,6 +88,8 @@ pub(crate) struct LightSettings {
 
 impl LightSettings {
     pub(crate) const DEFAULT: Self = Self {
+        low: BeamCfg::DEFAULT,
+        high: BeamCfg::DEFAULT,
         headlight: HEADLIGHT_INTENSITY,
         vanilla: VANILLA_HEADLIGHT_INTENSITY,
         low_beam_gain: 3.5,
@@ -31,10 +97,56 @@ impl LightSettings {
         high_beam_range: 1.0,
         high_beam_spread: 1.0,
         force_high_beam: false,
+        cone_offset: 0.0,
+        cone_side: 0.0,
+        cone_height: 0.0,
+        lamp_offset: 0.0,
+        lamp_side: 0.0,
+        lamp_height: -0.246,
+        lamp_yaw: 0.0,
+        lamp_pitch: 0.0,
+        lamp_range: 0.468,
+        lamp_core: 1.277,
+        lamp_spread: 0.951,
+        lamp_inner_add: 0.0,
+        lamp_outer_add: 6.885,
+        lamp_color: [1.0, 1.0, 1.0],
+        beam_marker: false,
         weather_boost: 0.8,
         weather_night: 0.6,
         corona: 1.0,
     };
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct InteriorCfg {
+    pub off: bool,
+    pub gain: f32,
+    pub range: f32,
+    pub color: [f32; 3],
+    pub shift: [f32; 3],
+}
+
+impl InteriorCfg {
+    pub(crate) const DEFAULT: Self = Self { off: false, gain: 1.0, range: 1.0, color: [1.0, 1.0, 1.0], shift: [0.0; 3] };
+}
+
+static INTERIOR: std::sync::Mutex<Vec<InteriorCfg>> = std::sync::Mutex::new(Vec::new());
+
+pub(crate) fn interior_cfg(i: usize) -> InteriorCfg {
+    INTERIOR.lock().unwrap_or_else(|e| e.into_inner()).get(i).copied().unwrap_or(InteriorCfg::DEFAULT)
+}
+
+pub(crate) fn set_interior_cfg(i: usize, c: InteriorCfg) {
+    let mut v = INTERIOR.lock().unwrap_or_else(|e| e.into_inner());
+    if v.len() <= i {
+        v.resize(i + 1, InteriorCfg::DEFAULT);
+    }
+    v[i] = c;
+}
+
+pub(crate) fn reset_interior_cfg() {
+    INTERIOR.lock().unwrap_or_else(|e| e.into_inner()).clear();
 }
 
 static SETTINGS: std::sync::Mutex<LightSettings> = std::sync::Mutex::new(LightSettings::DEFAULT);
@@ -47,19 +159,36 @@ pub(crate) fn set_settings(s: LightSettings) {
     *SETTINGS.lock().unwrap_or_else(|e| e.into_inner()) = s;
 }
 
+fn shift(dir: Vec3, forward: f32, side: f32, up: f32) -> DVec3 {
+    let d = dir.normalize_or_zero();
+    let right = d.cross(Vec3::Z).normalize_or_zero();
+    (d * forward + right * side + Vec3::Z * up).as_dvec3()
+}
+
+pub(crate) fn cone_shift(dir: Vec3, cfg: &LightSettings) -> DVec3 {
+    shift(dir, cfg.cone_offset, cfg.cone_side, cfg.cone_height)
+}
+
+fn lamp_aim(d: Vec3, cfg: &LightSettings, bc: &BeamCfg) -> Vec3 {
+    let d = d.normalize_or_zero();
+    let yawed = glam::Quat::from_rotation_z((cfg.lamp_yaw + bc.yaw).to_radians()) * d;
+    let right = yawed.cross(Vec3::Z).normalize_or_zero();
+    (glam::Quat::from_axis_angle(right, (cfg.lamp_pitch + bc.pitch).to_radians()) * yawed).normalize_or_zero()
+}
+
+pub(crate) fn lamp_shift(dir: Vec3, cfg: &LightSettings) -> DVec3 {
+    shift(dir, cfg.lamp_offset, cfg.lamp_side, cfg.lamp_height)
+}
+
 fn weather_darkness() -> f32 {
     let (vis, _) = cone_weather();
     (1.0 - vis / 3000.0).clamp(0.0, 1.0)
 }
 
-/// `[spotlight]` range is content-authored.  In particular, full beams commonly use a
-/// substantially longer range than dipped beams, so it must not be capped to the latter.
 fn headlight_radius(range: f32) -> f32 {
     range.max(6.0)
 }
 
-/// Keep the existing one-metre core for a typical 40 m dipped beam, while making a longer
-/// content-authored full beam equally useful at the same fraction of its range.
 fn headlight_core(range: f32) -> f32 {
     headlight_radius(range) / 30.0
 }
@@ -218,7 +347,13 @@ pub fn vehicle_lights(
                 let d = body
                     .transform_vector3(Vec3::new(vals[3], vals[4], vals[5]))
                     .normalize_or_zero();
-                let color = [vals[6] / 255.0, vals[7] / 255.0, vals[8] / 255.0];
+                let high_beam = cfg.force_high_beam || v.var("lights_fern").is_some_and(|x| x > 0.5);
+                let bc = if high_beam { cfg.high } else { cfg.low };
+                let color = [
+                    vals[6] / 255.0 * cfg.lamp_color[0] * bc.color[0],
+                    vals[7] / 255.0 * cfg.lamp_color[1] * bc.color[1],
+                    vals[8] / 255.0 * cfg.lamp_color[2] * bc.color[2],
+                ];
                 let mut apex = Vec3::new(vals[0], vals[1], vals[2]);
                 let dl = Vec3::new(vals[3], vals[4], vals[5]).normalize_or_zero();
                 let nose = lamps.iter().map(|l| l[1]).reduce(f32::max);
@@ -245,16 +380,21 @@ pub fn vehicle_lights(
                 let right = body.transform_vector3(Vec3::X).normalize_or_zero();
                 let apex = body.transform_point3(apex);
                 let (inner, outer) = (
-                    vals.get(10).copied().unwrap_or(30.0),
-                    vals.get(11).copied().unwrap_or(70.0),
+                    vals.get(10).copied().unwrap_or(30.0) + cfg.lamp_inner_add + bc.inner_add,
+                    vals.get(11).copied().unwrap_or(70.0) + cfg.lamp_outer_add + bc.outer_add,
                 );
                 let half = |deg: f32| (deg.clamp(1.0, 179.0) * 0.5).to_radians().cos();
                 let cone = [half(inner.min(outer)), half(outer)];
                 let sides: &[f32] = if spread > 0.1 { &[-1.0, 1.0] } else { &[0.0] };
                 for side in sides {
-                    let at = v.position + (apex + right * spread * side).as_dvec3();
-                    let high_beam = cfg.force_high_beam || v.var("lights_fern").is_some_and(|x| x > 0.5);
-                    let radius = headlight_radius(vals[9]) * if high_beam { cfg.high_beam_range } else { 1.0 };
+                    if !bc.on {
+                        continue;
+                    }
+                    let at = v.position
+                        + (apex + right * spread * cfg.lamp_spread * side).as_dvec3()
+                        + lamp_shift(d, &cfg)
+                        + shift(d, bc.forward, bc.side, bc.height);
+                    let radius = headlight_radius(vals[9]) * cfg.lamp_range.max(0.05) * bc.range.max(0.05) * if high_beam { cfg.high_beam_range } else { 1.0 };
                     let cone = if high_beam {
                         let k = cfg.high_beam_spread.max(0.1);
                         [1.0 - (1.0 - cone[0]) * k, 1.0 - (1.0 - cone[1]) * k]
@@ -265,7 +405,7 @@ pub fn vehicle_lights(
                         position: at,
                         radius,
                         color,
-                        direction: d,
+                        direction: lamp_aim(d, &cfg, &bc),
                         cone,
                         ..Default::default()
                     };
@@ -277,8 +417,9 @@ pub fn vehicle_lights(
                     lights.push(PointLight {
                         intensity: cfg.headlight / sides.len() as f32
                             * (1.0 + bad * cfg.weather_boost)
-                            * if high_beam { cfg.high_beam } else { 1.0 },
-                        core: headlight_core(radius),
+                            * if high_beam { cfg.high_beam } else { 1.0 }
+                            * bc.gain,
+                        core: headlight_core(radius) * cfg.lamp_core.max(0.01) * bc.core.max(0.01),
                         beam: if high_beam { -1.0 } else { cfg.low_beam_gain },
                         mode: LightMode::Enhanced,
                         ..lamp
@@ -363,6 +504,21 @@ mod tests {
 // occluders each, for a glow a few pixels wide - the cost on a weak graphics card)
 const SPILL_RANGE: f64 = 30.0;
 const SPILL_VEHICLES: usize = 3;
+static LED_GLOW: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+pub fn set_led_glow(v: f32) {
+    LED_GLOW.store(v.to_bits(), std::sync::atomic::Ordering::Relaxed);
+}
+
+const LED_RANGE: f64 = 40.0;
+const LED_PANELS: usize = 8;
+const LED_RADIUS: f32 = 6.0;
+const LED_INTENSITY: f32 = 0.5;
+const LED_OUTSET: f64 = 0.3;
+const LED_COLOR: [f32; 3] = [1.0, 0.62, 0.12];
+const SCREEN_RADIUS: f32 = 3.5;
+const SCREEN_INTENSITY: f32 = 0.22;
+const SCREEN_COLOR: [f32; 3] = [0.82, 0.9, 1.0];
 const INTERIOR_SPILL_OUTSET: f32 = 0.25;
 const INTERIOR_SPILL_SIDE: f32 = 0.45;
 const INTERIOR_SPILL_END: f32 = 0.3;
@@ -1093,6 +1249,7 @@ pub fn collect(
         veh_occ.clear();
     }
     let mut mesh_tests = 8usize;
+    let beam_cfg = settings();
     for (vi, v) in vehicles.iter().enumerate() {
         // (a vehicle out of sight: no lamps, no ray tests, no smoke)
         if (v.position - camera_pos).length() > visible_range {
@@ -1132,6 +1289,9 @@ pub fn collect(
                 c.size = c.size.min(0.6);
                 c.brightness = c.brightness.min(1.0);
             }
+            if c.beam {
+                c.position += cone_shift(c.direction, &beam_cfg);
+            }
             true
         });
         scene.coronas.extend(mine);
@@ -1160,6 +1320,89 @@ pub fn collect(
         log::info!("cones: visibility {vis:.0} m, dark {night:.2}, {} cones of {} coronas", scene.coronas.iter().filter(|c| c.beam).count(), scene.coronas.len());
         for c in scene.coronas.iter().filter(|c| c.beam).take(4) {
             log::info!("  cone at ({:.1}, {:.1}, {:.1}) dir {:?} radius {:.2} half angles {:.0}/{:.0} deg tex {}", c.position.x, c.position.y, c.position.z, c.direction, c.size, c.inner_cos.to_degrees(), c.cone_cos.to_degrees(), c.texture);
+        }
+    }
+    {
+        let glow = f32::from_bits(LED_GLOW.load(std::sync::atomic::Ordering::Relaxed));
+        let mut panels: Vec<(f64, DVec3, f32, bool)> = scene
+            .instances
+            .iter()
+            .filter(|i| i.visible)
+            .filter_map(|i| {
+                let gate = |led: bool| {
+                    i.materials
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, m)| {
+                            scene.materials.get(**m).is_some_and(|m| if led { m.is_led() } else { m.is_screen() && !m.is_led() })
+                        })
+                        .map(|(k, m)| {
+                            let gate = i.slot_light.get(k).copied().unwrap_or(1.0).clamp(0.0, 1.0);
+                            let seen = |t: Option<usize>, alpha: bool| {
+                                t.and_then(|t| scene.tex_luma.lock().ok().and_then(|l| l.get(&t).copied()))
+                                    .map(|(c, a)| if alpha { a } else { c })
+                            };
+                            // a screen throws only the light it shows: a black or switched-off
+                            // script / HTML picture throws none; an LED panel (its dots are the
+                            // alpha of its `\S:n` script texture) only as many dots as are lit
+                            let shown = scene
+                                .materials
+                                .get(*m)
+                                .and_then(|m| if led { seen(m.transmap.map(|t| t.0), true) } else { seen(m.texture, false) })
+                                .unwrap_or(0.0);
+                            gate * (shown * if led { 8.0 } else { 3.0 }).clamp(0.0, 1.0)
+                        })
+                        .fold(0.0f32, f32::max)
+                };
+                let (led, g) = if glow > 0.0 && gate(true) > 0.01 {
+                    (true, gate(true))
+                } else if gate(false) > 0.01 {
+                    (false, gate(false))
+                } else {
+                    return None;
+                };
+                let c = i.world_centre();
+                Some(((c - camera_pos).length(), c, g, led))
+            })
+            .filter(|(d, _, _, _)| *d < LED_RANGE)
+            .collect();
+        panels.sort_by(|a, b| a.0.total_cmp(&b.0));
+        for (_, c, gate, led) in panels.into_iter().take(LED_PANELS) {
+            let out = vehicles
+                .iter()
+                .min_by(|a, b| (a.position - c).length().total_cmp(&(b.position - c).length()))
+                .filter(|v| (v.position - c).length() < 20.0)
+                .map(|v| {
+                    let b = v.ty.def.bounding_box.unwrap_or([2.5, 12.0, 3.0, 0.0, 0.0, 0.0]);
+                    let h = v.heading.to_radians();
+                    let (fwd, right) = (DVec3::new(h.sin(), h.cos(), 0.0), DVec3::new(h.cos(), -h.sin(), 0.0));
+                    let d = c - v.position;
+                    let lx = d.dot(right) - b[3] as f64;
+                    let ly = d.dot(fwd) - b[4] as f64;
+                    let (ex, ey) = (lx.abs() - (b[0] as f64 * 0.5 - 0.5), ly.abs() - (b[1] as f64 * 0.5 - 0.5));
+                    if ex <= 0.0 && ey <= 0.0 {
+                        DVec3::ZERO
+                    } else if ex > ey {
+                        right * lx.signum()
+                    } else {
+                        fwd * ly.signum()
+                    }
+                })
+                .unwrap_or(DVec3::ZERO);
+            let n = night.clamp(0.0, 1.0);
+            let (radius, color, intensity) = if led {
+                (LED_RADIUS, LED_COLOR, LED_INTENSITY * glow * gate * (0.2 + 0.8 * n))
+            } else {
+                (SCREEN_RADIUS, SCREEN_COLOR, SCREEN_INTENSITY * gate * n)
+            };
+            scene.lights.push(PointLight {
+                position: c + out * LED_OUTSET,
+                radius,
+                color,
+                intensity,
+                mode: LightMode::Enhanced,
+                ..Default::default()
+            });
         }
     }
     if omsi_cfg::env::var_os("OMSI_DEBUG_LIGHT").is_some() {

@@ -1861,10 +1861,14 @@ fn fs_main(in: FsIn) -> @location(0) vec4<f32> {
     }
     // [interiorlight]: the saloon lamps on the meshes and passengers they illuminate (in
     // a light-mapped material's vertex light already, above)
-    if (!light_mapped && !classic) {
+    // A script/text screen (unlit) shows exactly the picture the script draws: no saloon
+    // lamps, night map, light map or sphere map of the slot's original material on top
+    // (they lit up the black parts of the display).
+    let screen_unlit = material.params.y > 0.5 && material.flags.x > 0.5;
+    if (!light_mapped && !classic && !screen_unlit) {
         lit = lit + tex.rgb * interior_lamps(in.world, n, in.params2.z);
     }
-    if (material.extra.w > 0.5 && !terrain_night) {
+    if (material.extra.w > 0.5 && !terrain_night && !screen_unlit) {
         // [matl_nightmap]: self-illumination that fades in with the night
         // terrain: the tile light map in tile space (north at the top row)
         let nuv = select(buv, vec2<f32>(in.uv.x, 1.0 - in.uv.y), material.extra.x > 0.5);
@@ -1872,9 +1876,23 @@ fn fs_main(in: FsIn) -> @location(0) vec4<f32> {
         // a [matl_item] night map is switched by its variable (warning lamps, displays):
         // it glows whenever that is on, by day as well; the others fade in with the night
         let night = select(camera.sun_color.w, 1.0, material.extra.w > 1.5);
-        lit = lit + nm.rgb * night * select(clamp(in.params2.y, 0.0, 1.0), 1.0, material.extra.w > 1.5);
+        let glow = night * select(clamp(in.params2.y, 0.0, 1.0), 1.0, material.extra.w > 1.5);
+        if (material.extra.w > 1.5) {
+            // a switched item (button, lamp): laid on with ADDSMOOTH (lit + glow x (1 - lit)) instead
+            // of plainly added, which blew the already lit texture out to white by day
+            if (classic) {
+                let e = srgb_encode(clamp(lit, vec3<f32>(0.0), vec3<f32>(1.0)));
+                let g = srgb_encode(clamp(nm.rgb, vec3<f32>(0.0), vec3<f32>(1.0))) * glow;
+                lit = srgb_decode(e + g * (vec3<f32>(1.0) - e));
+            } else {
+                let e = clamp(lit, vec3<f32>(0.0), vec3<f32>(1.0));
+                lit = e + nm.rgb * glow * (vec3<f32>(1.0) - e);
+            }
+        } else {
+            lit = lit + nm.rgb * glow;
+        }
     }
-    if (material.params2.y > 0.0) {
+    if (material.params2.y > 0.0 && !screen_unlit) {
         // [matl_envmap]: sphere map reflection, masked by the diffuse alpha like the original
         let vdir = normalize(in.world - camera.cam_pos.xyz);
         let r = reflect(vdir, n);

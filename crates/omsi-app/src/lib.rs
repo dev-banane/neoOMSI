@@ -6,6 +6,7 @@ mod camera_arm;
 mod career;
 mod describe;
 #[cfg(all(feature = "devtools", debug_assertions))]
+#[path = "dev-tools/mod.rs"]
 mod devtools;
 mod discord;
 mod driver;

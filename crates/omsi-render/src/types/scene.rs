@@ -108,9 +108,18 @@ pub struct Instance {
     pub ordered: bool,
 }
 
+impl Instance {
+    pub fn world_centre(&self) -> DVec3 {
+        self.origin + self.bounds.centre.as_dvec3()
+    }
+}
+
 pub struct Scene {
     pub meshes: Vec<GpuMesh>,
     pub textures: Vec<GpuTexture>,
+    /// Mean (light, alpha) (alpha x brightest channel, alpha; 0..1) of a texture the last time it was
+    /// uploaded by `update_texture`: what a script or HTML screen actually shows.
+    pub tex_luma: std::sync::Mutex<std::collections::HashMap<TextureId, (f32, f32)>>,
     pub(crate) glass_slot: Option<TextureId>,
     pub(crate) glass_key: Option<GlassKey>,
     pub materials: Vec<Material>,

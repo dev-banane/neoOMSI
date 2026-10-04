@@ -653,6 +653,47 @@ fn door_group_plan(v: &omsi_sim::VehicleInstance, group: &[String]) -> Vec<Strin
 }
 
 impl Player {
+    pub(crate) fn press_control(&mut self, i: usize) {
+        self.release();
+        let Some(ev) = self
+            .vehicle
+            .ty
+            .meshes
+            .get(i)
+            .and_then(|m| self.vehicle.ty.model.meshes.get(m.def_index))
+            .and_then(|d| d.mouse_event.clone())
+        else {
+            return;
+        };
+        let plain = self.vehicle.trigger(&ev);
+        self.repair_roller_blind(&ev);
+        self.pressed_mesh = Some(i);
+        self.press_info = (plain, 0.0);
+        self.auto_drag = None;
+        self.release();
+    }
+
+    pub(crate) fn control_list(&self) -> Vec<(usize, String)> {
+        let mut out: Vec<(usize, String)> = Vec::new();
+        for (i, m) in self.vehicle.ty.meshes.iter().enumerate() {
+            let Some(ev) = self
+                .vehicle
+                .ty
+                .model
+                .meshes
+                .get(m.def_index)
+                .and_then(|d| d.mouse_event.clone())
+            else {
+                continue;
+            };
+            if !out.iter().any(|(_, e)| *e == ev) {
+                out.push((i, ev));
+            }
+        }
+        out.sort_by(|a, b| a.1.to_ascii_lowercase().cmp(&b.1.to_ascii_lowercase()));
+        out
+    }
+
     pub(crate) fn toggle_indicator(&mut self, want: u8) {
         let lever = if self
             .vehicle

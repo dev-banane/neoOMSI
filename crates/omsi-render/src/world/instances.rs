@@ -5,6 +5,7 @@ impl Renderer {
         Scene {
             meshes: Vec::new(),
             textures: Vec::new(),
+            tex_luma: Default::default(),
             glass_slot: None,
             glass_key: None,
             materials: Vec::new(),

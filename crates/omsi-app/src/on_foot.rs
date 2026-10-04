@@ -64,6 +64,7 @@ pub(crate) struct OnFoot {
     pub arrive: Option<Then>,
     pub safe: DVec3,
     pub on_lane: bool,
+    pub door_grace: f32,
     pub attached: bool,
 }
 
@@ -136,6 +137,7 @@ impl OnFoot {
             arrive: None,
             safe: pos,
             on_lane: false,
+            door_grace: 0.0,
             attached: false,
         }
     }

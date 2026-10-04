@@ -169,6 +169,17 @@ fn mirror_index(name: &str) -> Option<usize> {
     digits.parse().ok()
 }
 
+fn is_led_name(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    n.split(|c: char| !c.is_ascii_alphanumeric()).any(|t| {
+        t == "led"
+            || t.starts_with("ledmatrix")
+            || t.starts_with("ledpanel")
+            || t.starts_with("ledanzeige")
+            || t.strip_prefix("led").is_some_and(|r| !r.is_empty() && r.chars().all(|c| c.is_ascii_digit()))
+    })
+}
+
 /// A light map that is white all over (the LED panels' `vmatrix_leer_led_LM.png`, one white
 /// pixel): the surface is all its own light. A flipdot panel carries the same `\S:n` mask,
 /// but its light map is a picture of the lamps over it (`vmatrix_leer_LM.bmp`).
@@ -7089,7 +7100,19 @@ impl World {
                                                 &Image { width: 4, height: 4, rgba: [0, 0, 0, 255].repeat(16), has_alpha: true },
                                                 false,
                                             );
-                                            let mat = renderer.add_material(scene, Some(tex), text_alpha(o3d_mats, slot, overrides), [1.0; 4], true);
+                                            let mat = renderer.add_material_extra(
+                                                scene,
+                                                Some(tex),
+                                                text_alpha(o3d_mats, slot, overrides),
+                                                [1.0; 4],
+                                                true,
+                                                None,
+                                                None,
+                                                None,
+                                                None,
+                                                [0.0; 3],
+                                                MaterialExtra { screen: true, ..Default::default() },
+                                            );
                                             let mat = gpu.material(renderer, scene, mat);
                                             tg.textures.push(tex);
                                             tg.materials.push(mat);
@@ -9661,7 +9684,9 @@ fn sync_interior_lamps(
                 .or_else(|| var(&il.variable))
                 .unwrap_or(0.0)
                 >= 0.5;
-            let at = rotation.transform_vector3(glam::Vec3::from(il.pos));
+            let ic = crate::lights::interior_cfg(li);
+            let on = on && !ic.off;
+            let at = rotation.transform_vector3(glam::Vec3::from(il.pos) + glam::Vec3::from(ic.shift));
             renderer.set_interior_light(
                 scene,
                 first + k as u32,
@@ -9671,9 +9696,13 @@ fn sync_interior_lamps(
                     // colour / 255, Range 100 m, attenuation 1 / (d² / range²) - full
                     // light at `range` metres, stronger closer in, a quarter at twice
                     radius: 100.0,
-                    core: il.range.max(0.01),
-                    color: [il.color[0] / 255.0, il.color[1] / 255.0, il.color[2] / 255.0],
-                    intensity: if on { 1.0 } else { 0.0 },
+                    core: (il.range * ic.range).max(0.01),
+                    color: [
+                        il.color[0] / 255.0 * ic.color[0],
+                        il.color[1] / 255.0 * ic.color[1],
+                        il.color[2] / 255.0 * ic.color[2],
+                    ],
+                    intensity: if on { ic.gain } else { 0.0 },
                     ..Default::default()
                 },
             );
@@ -10559,6 +10588,12 @@ impl Look {
             l.color = [1.0; 4];
             l.emissive = [0.0; 3];
             l.unlit = true;
+            // (shown as the script draws it, like an HTML page: the slot's night, light and
+            // sphere maps would light the display's black parts)
+            l.night = None;
+            l.lightmap = None;
+            l.envmap = None;
+            l.extra.night_switched = false;
         }
         l
     }
@@ -11572,9 +11607,11 @@ impl World {
                     color,
                     d.script.is_some(),
                     transmap,
-                    d.night,
-                    d.lightmap,
-                    d.envmap,
+                    // (a script's picture is shown as drawn: the slot's night, light and
+                    // sphere maps would light the display's black parts)
+                    if d.script.is_some() { None } else { d.night },
+                    if d.script.is_some() { None } else { d.lightmap },
+                    if d.script.is_some() { None } else { d.envmap },
                     emissive,
                     extra,
                 );
@@ -11910,8 +11947,10 @@ impl World {
                     });
                     // (a `\S:n` panel lit all over by its light map is an LED panel; one
                     // whose light map is a picture is a flipdot: see `is_white_lightmap`)
+                    let html_page = |n: Option<usize>| n.is_some_and(|n| vt.model.html_textures.iter().any(|d| d.script_index == n));
                     let lm_white = |ov: &[&MaterialDef]| -> bool {
-                        ov.iter().find_map(|o| o.lightmap.as_ref()).and_then(|(t, _)| lightmap_is_white(t, &dirs_ref)).unwrap_or(true)
+                        let named = ov.iter().filter_map(|o| o.lightmap.as_ref().map(|l| l.0.as_str())).chain(std::iter::once(m.texture.as_str())).any(is_led_name);
+                        named && ov.iter().find_map(|o| o.lightmap.as_ref()).and_then(|(t, _)| lightmap_is_white(t, &dirs_ref)).unwrap_or(true)
                     };
                     // [matl_envmap] tex factor: reflectivity = factor (saturating at 1) x the
                     // reflection mask, which is the [matl_envmap_mask]'s alpha or else the
@@ -11955,7 +11994,7 @@ impl World {
                     // without the flags on this `extra` the K++ and Krueger panels showed
                     // their dots but never glowed.
                     extra.screen = script_slot.is_some() || script_trans.is_some();
-                    extra.led = script_trans.is_some() && lm_white(&ov);
+                    extra.led = script_trans.is_some() && !html_page(script_trans) && lm_white(&ov);
                     if dirt_overlay {
                         extra.no_z_write = true;
                     }
@@ -12048,7 +12087,7 @@ impl World {
                         it_extra.screen = script_item.is_some() || it_script_trans.is_some();
                         // (the item's `\S:n`, or the one it inherits from its base, keeps it
                         // an LED panel: see `MaterialExtra::led`)
-                        it_extra.led = it_script_trans.is_some() && if ov_item.iter().any(|o| o.lightmap.is_some()) { lm_white(ov_item) } else { lm_white(&ov) };
+                        it_extra.led = it_script_trans.is_some() && !html_page(it_script_trans) && if ov_item.iter().any(|o| o.lightmap.is_some()) { lm_white(ov_item) } else { lm_white(&ov) };
                         it_extra.no_z_write |= extra.no_z_write;
                         it_extra.no_z_check |= extra.no_z_check;
                         it_extra.glass |= extra.glass;

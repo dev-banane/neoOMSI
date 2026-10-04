@@ -308,6 +308,20 @@ impl Renderer {
 
     /// Replace the pixels of a texture (same size as when created, no mipmaps regenerated).
     pub fn update_texture(&self, scene: &Scene, id: TextureId, img: &omsi_texture::Image) {
+        // what the screen shows, for the light it throws (`lights.rs`)
+        {
+            let n = (img.rgba.len() / 4).max(1);
+            let step = (n / 4096).max(1);
+            let (mut sum, mut asum, mut cnt) = (0.0f32, 0.0f32, 0u32);
+            for px in img.rgba.chunks_exact(4).step_by(step) {
+                sum += px[3] as f32 / 255.0 * px[0].max(px[1]).max(px[2]) as f32 / 255.0;
+                asum += px[3] as f32 / 255.0;
+                cnt += 1;
+            }
+            if let Ok(mut m) = scene.tex_luma.lock() {
+                m.insert(id, (sum / cnt.max(1) as f32, asum / cnt.max(1) as f32));
+            }
+        }
         let t = &scene.textures[id].texture;
         self.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
