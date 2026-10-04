@@ -140,20 +140,18 @@ ${s.DOCS.map((d) => s.source(d.file)!.trim().replace(/^#/gm, '##')).join('\n\n')
 )
 
 const { width, height } = s.OG_IMAGE
-const wordmark = await sharp(join(import.meta.dirname, '../assets/logos/neoOMSI-wordmark.png')).trim().resize({ width: 720 }).png().toBuffer()
-const logo = await sharp(wordmark).metadata()
-const road = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}">
-  <rect width="100%" height="100%" fill="#0f0f0f"/>
-  <g stroke="#fd6b00" stroke-linecap="round">
-    <path d="M-40 560 L1240 470" stroke-width="7"/>
-    <path d="M-40 640 L1240 520" stroke-width="7"/>
-    <path d="M-40 600 L1240 495" stroke-width="10" stroke-dasharray="90 150"/>
-  </g>
-</svg>`
+const mark = await sharp(app('neoomsi-512.png')).trim().resize({ height: 220 }).png().toBuffer()
+const wordmark = await sharp(join(import.meta.dirname, '../assets/logos/neoOMSI-wordmark.png')).trim().resize({ width: 600 }).png().toBuffer()
+const [m, w] = await Promise.all([sharp(mark).metadata(), sharp(wordmark).metadata()])
+const gap = 64
+const left = Math.round((width - m.width! - gap - w.width!) / 2)
 write(
   s.OG_IMAGE.path,
-  await sharp(Buffer.from(road))
-    .composite([{ input: wordmark, left: Math.round((width - logo.width!) / 2), top: Math.round(height * 0.42 - logo.height! / 2) }])
+  await sharp({ create: { width, height, channels: 3, background: '#0f0f0f' } })
+    .composite([
+      { input: mark, left, top: Math.round((height - m.height!) / 2) },
+      { input: wordmark, left: left + m.width! + gap, top: Math.round((height - w.height!) / 2) },
+    ])
     .png()
     .toBuffer(),
 )
