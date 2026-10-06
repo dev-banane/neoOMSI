@@ -148,6 +148,8 @@ pub struct Rig {
     pub wrist: [Vec3; 2],
     /// Rest direction of the weighted hand, separate from the forearm axis.
     pub hand_axis: [Vec3; 2],
+    pub hand_len: f32,
+    pub thumb: f32,
     pub waist: Vec3,
     pub neck: Vec3,
     /// What the head turns about: at the neck's height, under the middle of the head. The
@@ -302,6 +304,26 @@ impl Rig {
             hand_vertices.iter().sum::<Vec3>() / hand_vertices.len() as f32 - wrist
         }
         .normalize_or((wrist - elbow).normalize_or(Vec3::X));
+        let along = |p: &Vec3| (*p - wrist).dot(hand_axis);
+        let hand_len = if hand_vertices.is_empty() {
+            0.18 * scale
+        } else {
+            hand_vertices
+                .iter()
+                .map(along)
+                .fold(0.0f32, f32::max)
+                .clamp(0.1 * scale, 0.26 * scale)
+        };
+        let thumb = hand_vertices
+            .iter()
+            .filter(|p| (0.35..0.7).contains(&(along(p) / hand_len)))
+            .map(|p| p.y - wrist.y)
+            .fold(f32::MIN, f32::max);
+        let thumb = if thumb.is_finite() {
+            (thumb - 0.012 * scale).clamp(0.0, 0.06 * scale)
+        } else {
+            0.025 * scale
+        };
         let seat_lift = if def.seat_height > 0.2 {
             (hip.z - def.seat_height).clamp(0.05, 0.2)
         } else {
@@ -325,6 +347,8 @@ impl Rig {
             elbow: [mirror(elbow), elbow],
             wrist: [mirror(wrist), wrist],
             hand_axis: [mirror(hand_axis), hand_axis],
+            hand_len,
+            thumb,
             waist: j.waist,
             neck: j.neck,
             head_pivot: if head_reliable {
@@ -406,9 +430,18 @@ impl Rig {
     }
 
     /// How far in front of a seat's `[passpos]` (the hip) a person stands before sitting
-    /// down, which is also where the feet stay while seated.
+    /// down, which is also where the feet stay while seated: clear of the cushion's front
+    /// edge (about 0.22 m ahead of the point) with the heels, whatever the legs' length.
     pub fn seat_front(&self) -> f32 {
-        (self.thigh * 0.85).clamp(0.25, 0.4)
+        (self.thigh * 0.9).clamp(0.36, 0.45)
+    }
+
+    pub fn reach_spot(&self, rise: f32) -> Vec2 {
+        let arm = self.upper_arm + self.forearm + 1.2 * self.hand_len;
+        let dz = rise - self.shoulder[1].z;
+        let d = 0.8 * arm;
+        let ahead = (d * d - dz * dz).max(0.0).sqrt().clamp(0.22, 0.75 * arm);
+        Vec2::new(0.7 * self.shoulder[1].x, ahead)
     }
 
     /// Steps per second at `speed`, as Omsi.exe times the walk (0x626ae8): the stride is
@@ -538,6 +571,18 @@ impl HumanType {
             lower.extend(ms.into_iter().map(|m| (levels.len() - 1, m)));
         }
         levels.last_mut().unwrap().0 = 0.0;
+        for level in 1..levels.len() {
+            let ms: Vec<&mut HumanMesh> = lower
+                .iter_mut()
+                .filter(|(l, _)| *l == level)
+                .map(|(_, m)| m)
+                .collect();
+            if ms.len() == meshes.len() {
+                for (m, top) in ms.into_iter().zip(&meshes) {
+                    crate::human_lod::keep_small_parts(m, top);
+                }
+            }
+        }
         let mut joints = Joints::from_links(&def.links);
         fit_leg_joints(&mut joints, &meshes, path);
         fit_arm_joints(&mut joints, &meshes);
@@ -857,6 +902,14 @@ pub enum Activity {
     Pay,
 }
 
+pub enum Gesture {
+    #[default]
+    Touch,
+    Give,
+    Take,
+    Insert,
+}
+
 /// What the animation needs to know about a person this frame. Points and directions are
 /// in the person's model frame (x right, y forward, z up, origin at the feet) unless they
 /// say otherwise.
@@ -879,6 +932,10 @@ pub struct PoseInput<'a> {
     pub look: Option<Vec3>,
     /// Where the right hand reaches (the cash desk).
     pub reach: Option<Vec3>,
+    pub gesture: Gesture,
+    /// The direction the hand moves in at the end of the reach (into the slot, onto the
+    /// tray); horizontal from the shoulder when not given.
+    pub approach: Option<Vec3>,
     /// Where both hands hold on (left, right): the driver's hands on the steering wheel.
     /// Followed as given every frame, no easing (the caller moves them).
     pub grips: Option<[Vec3; 2]>,
@@ -908,6 +965,8 @@ impl Default for PoseInput<'_> {
             seat: None,
             look: None,
             reach: None,
+            gesture: Gesture::Touch,
+            approach: None,
             grips: None,
             grip_frames: None,
             grip_lean: 0.0,
@@ -931,6 +990,10 @@ struct Foot {
     from_yaw: f64,
     from_pitch: f32,
     from_floor: f64,
+    ground: f32,
+    from_ground: f32,
+    to_ground: f32,
+    mid_floor: f64,
     to: DVec3,
     to_yaw: f64,
     /// Floor height sampled at `to` (and where that was).
@@ -963,6 +1026,10 @@ impl Foot {
             from_yaw: 0.0,
             from_pitch: 0.0,
             from_floor: 0.0,
+            ground: 0.0,
+            from_ground: 0.0,
+            to_ground: 0.0,
+            mid_floor: f64::NAN,
             to: DVec3::ZERO,
             to_yaw: 0.0,
             to_floor: 0.0,
@@ -999,11 +1066,19 @@ pub struct Pose {
     /// Standing offsets of the feet (a little different each time somebody settles).
     fidget: [Vec2; 2],
     fidget_t: f32,
-    /// 0 standing … 1 seated, and the seat.
+    /// 0 standing … 1 seated, the seat, and whether the last change was getting up.
     sit: f32,
+    getting_up: bool,
     seat: Vec3,
     reach: f32,
     reach_at: Vec3,
+    gesture: Gesture,
+    approach: Vec3,
+    reach_hold: f32,
+    press: f32,
+    stow: f32,
+    stow_t: f32,
+    grade: f32,
     /// Both hands on a steering wheel: how far (0 … 1) and where.
     grip: f32,
     grip_at: [Vec3; 2],
@@ -1168,9 +1243,17 @@ impl Pose {
             fidget: [Vec2::ZERO; 2],
             fidget_t: 0.0,
             sit: 0.0,
+            getting_up: false,
             seat: Vec3::ZERO,
             reach: 0.0,
             reach_at: Vec3::new(0.3, 0.5, 1.1),
+            gesture: Gesture::Touch,
+            approach: Vec3::Y,
+            reach_hold: 0.0,
+            press: 0.0,
+            stow: 0.0,
+            stow_t: 0.0,
+            grade: 0.0,
             grip: 0.0,
             grip_at: [Vec3::new(-0.2, 0.4, 1.0), Vec3::new(0.2, 0.4, 1.0)],
             grip_frame: None,
@@ -1218,6 +1301,15 @@ impl Pose {
     /// 0 standing … 1 seated.
     pub fn sit_amount(&self) -> f32 {
         self.sit
+    }
+
+    /// Steps shorten on a slope, most going down (a quarter down: a third shorter).
+    fn stride_scale(&self) -> f32 {
+        if self.grade < 0.0 {
+            1.0 / (1.0 - 2.0 * self.grade)
+        } else {
+            1.0 / (1.0 + self.grade)
+        }
     }
 
     /// Floor frame, foot-root origin and heading used by the current pose.
@@ -1318,6 +1410,8 @@ impl Pose {
             && self.feet.iter().all(|f| f.planted)
             && (self.sit == 0.0 || self.sit == 1.0)
             && (self.reach == 0.0 || self.reach == 1.0)
+            && self.press == 0.0
+            && self.stow == 0.0
             && (self.hold == 0.0 || self.hold == 1.0)
     }
 
@@ -1365,7 +1459,7 @@ impl Pose {
     ) -> (DVec3, f64) {
         let r = rig.rest_foot(side);
         let (x, y) = if walking {
-            let stride = self.speed / (rig.cadence(self.speed) * 0.5);
+            let stride = self.speed / (rig.cadence(self.speed) * 0.5) * self.stride_scale();
             let beta = stance_fraction(self.speed);
             (r.x * 0.62, r.y + 0.4 * beta * stride)
         } else {
@@ -1397,7 +1491,8 @@ impl Pose {
         let h = f.yaw.to_radians();
         let (s, c) = (h.sin(), h.cos());
         let dir = DVec3::new(s, c, 0.0);
-        let p = pitch.to_radians();
+        let g = f.ground.to_radians() as f64;
+        let p = pitch.to_radians() + f.ground.to_radians();
         let ah = rig.ankle_h as f64;
         // pivot on the heel when the toes are up, on the toe joint when the heel is up (the
         // toes stay flat)
@@ -1407,11 +1502,11 @@ impl Pose {
             (rig.ball as f64, rig.ball_h as f64)
         };
         let (sp, cp) = (p.sin() as f64, p.cos() as f64);
-        // the ankle seen from the pivot, turned by the pitch
+        // the ankle seen from the pivot (on the sloping floor), turned by the pitch
         let (a, u) = (-pivot, ah - ph);
         let along = a * cp - u * sp;
         let up = a * sp + u * cp;
-        f.pos + dir * (pivot + along) + DVec3::Z * (ph + up)
+        f.pos + dir * (pivot + along) + DVec3::Z * (pivot * g.tan() + ph + up)
     }
 
     /// Advance the animation by `dt` seconds.
@@ -1505,20 +1600,35 @@ impl Pose {
         self.origin = input.origin;
         self.heading = input.heading;
         let v_in = input.velocity.length() as f32;
+        // the slope of the walk: shorter, quicker steps down a hill
+        let grade_to = match input.floor {
+            Some(_) if v_in > 0.05 => {
+                let dir = input.velocity / input.velocity.length();
+                let (at, z) = (input.origin.truncate(), input.origin.z);
+                let ahead = Self::sample_floor(input, at + dir * 0.45, z);
+                let behind = Self::sample_floor(input, at - dir * 0.45, z);
+                ((ahead - behind) / 0.9).clamp(-0.6, 0.6) as f32
+            }
+            _ => 0.0,
+        };
+        self.grade += (grade_to - self.grade) * ease_k(dt, 0.3);
 
         // sitting down and getting up
         let wants_sit = input.activity == Activity::Sit && input.seat.is_some();
         if let Some(s) = input.seat {
             self.seat = s;
         }
+        let sit_before = self.sit;
         if wants_sit {
-            if self.sit < 0.01 {
-                self.body_floor = 0.0;
-                self.reset_feet(rig, input);
-            }
-            self.sit = approach(self.sit, 1.0, dt / 1.3);
+            // the last step of turning round lands as the body starts down
+            let stepping = !self.feet.iter().all(|f| f.planted);
+            let to = if stepping && self.sit < 0.1 { 0.1 } else { 1.0 };
+            self.sit = approach(self.sit, to, dt / 1.7);
         } else {
             self.sit = approach(self.sit, 0.0, dt / 1.1);
+        }
+        if self.sit != sit_before {
+            self.getting_up = self.sit < sit_before;
         }
         let seated = self.sit > 0.0;
 
@@ -1526,14 +1636,47 @@ impl Pose {
         match input.reach {
             Some(r) if !seated => {
                 // the hand moves on to a new target, it does not jump there
+                let along = input
+                    .approach
+                    .filter(|a| a.length_squared() > 1e-6)
+                    .unwrap_or_else(|| (r - rig.shoulder[1]).with_z(0.0))
+                    .normalize_or(Vec3::Y);
                 if self.reach <= 0.0 {
                     self.reach_at = r;
+                    self.approach = along;
+                    self.reach_hold = 0.0;
                 } else {
                     self.reach_at += (r - self.reach_at) * ease_k(dt, 0.22);
+                    self.approach = (self.approach + (along - self.approach) * ease_k(dt, 0.2))
+                        .normalize_or(along);
                 }
-                self.reach = approach(self.reach, 1.0, dt / 0.55);
+                self.gesture = input.gesture;
+                self.reach = approach(self.reach, 1.0, dt / REACH_TIME);
+                if self.reach >= 1.0 {
+                    self.reach_hold += dt;
+                }
+                if self.gesture == Gesture::Insert && self.reach_hold > 0.08 {
+                    self.press = approach(self.press, 1.0, dt / 0.3);
+                }
             }
-            _ => self.reach = approach(self.reach, 0.0, dt / 0.6),
+            _ => {
+                if self.press > 0.0 {
+                    self.press = approach(self.press, 0.0, dt / 0.25);
+                } else {
+                    if self.gesture == Gesture::Take && self.reach >= 1.0 {
+                        self.stow = 1.0;
+                        self.stow_t = 0.0;
+                    }
+                    self.reach = approach(self.reach, 0.0, dt / REACH_TIME);
+                }
+                self.reach_hold = 0.0;
+            }
+        }
+        if self.reach <= 0.0 && self.stow > 0.0 {
+            self.stow_t += dt;
+            if self.stow_t > 0.7 {
+                self.stow = approach(self.stow, 0.0, dt / 0.7);
+            }
         }
         match input.grips {
             Some(g) => {
@@ -1617,7 +1760,15 @@ impl Pose {
                 Vec2::new((self.rand() - 0.5) * 110.0, (self.rand() - 0.6) * 18.0)
             };
         }
-        let look_to = match input.look {
+        // the eyes go to where the hand is going, and to the ticket held up
+        let watch = if self.reach > 0.05 && (input.reach.is_some() || self.press > 0.0) {
+            Some(self.reach_at)
+        } else if self.stow > 0.3 {
+            Some(stow_point(rig) + Vec3::Z * self.body_floor)
+        } else {
+            None
+        };
+        let look_to = match input.look.or(watch) {
             Some(p) => {
                 let from = rig.neck + Vec3::Z * 0.08;
                 let d = p - from;
@@ -1651,7 +1802,7 @@ impl Pose {
         };
         self.walk += (walk_to - self.walk) * ease_k(dt, 0.2);
         let speed = self.speed.max(0.08);
-        let cadence = rig.cadence(speed) * 0.5;
+        let cadence = rig.cadence(speed) * 0.5 / self.stride_scale();
         let beta = stance_fraction(speed);
         if gait_now && !self.gait {
             // start with the foot that is further back (or the one already in the air)
@@ -1722,6 +1873,8 @@ impl Pose {
                     f.from_ankle = Self::stance_ankle(rig, f, 0.0);
                     f.from_yaw = f.yaw;
                     f.from_pitch = 0.0;
+                    f.from_ground = f.ground;
+                    f.mid_floor = f64::NAN;
                     f.from_floor = f.pos.z;
                     f.planted = false;
                     f.walk = false;
@@ -1762,6 +1915,8 @@ impl Pose {
                 f.from_ankle = Self::stance_ankle(rig, f, from_pitch);
                 f.from_yaw = f.yaw;
                 f.from_pitch = from_pitch;
+                f.from_ground = f.ground;
+                f.mid_floor = f64::NAN;
                 f.from_floor = f.pos.z;
                 f.planted = false;
                 f.walk = true;
@@ -1785,7 +1940,7 @@ impl Pose {
                 continue;
             }
             if u1 < beta || u1 < u0 {
-                self.land(input, side);
+                self.land(rig, input, side);
                 continue;
             }
             // on its way: to where the body will be when it lands
@@ -1805,7 +1960,7 @@ impl Pose {
             f.t = f.t.max(t);
         }
         // standing: step when a foot is left too far from where it belongs
-        if !self.gait && !seated && self.feet.iter().all(|f| f.planted) {
+        if !self.gait && self.sit < 0.1 && self.feet.iter().all(|f| f.planted) {
             let mut worst: Option<(usize, f32)> = None;
             for side in 0..2 {
                 let (rp, ryaw) = self.rest_target(rig, side, self.origin, self.heading, false);
@@ -1826,11 +1981,13 @@ impl Pose {
                 f.from_ankle = Self::stance_ankle(rig, f, 0.0);
                 f.from_yaw = f.yaw;
                 f.from_pitch = 0.0;
+                f.from_ground = f.ground;
+                f.mid_floor = f64::NAN;
                 f.from_floor = f.pos.z;
                 f.planted = false;
                 f.walk = false;
                 f.t = 0.0;
-                f.dur = if bad > 2.5 { 0.28 } else { 0.38 };
+                f.dur = if bad > 2.5 || wants_sit { 0.28 } else { 0.38 };
                 f.lift = 0.045 * rig.scale;
                 f.to_sampled = DVec2::splat(f64::MAX);
                 f.land_z = f.pos.z;
@@ -1888,7 +2045,7 @@ impl Pose {
         self.body_floor += (floor_to - self.body_floor) * ease_k(dt, 0.18);
         // the pelvis may rise again only gradually
         self.drop = approach(self.drop, 0.0, dt * 0.4);
-        self.swing_floor(input, dt);
+        self.swing_floor(rig, input, dt);
     }
 
     fn fly(
@@ -1921,11 +2078,11 @@ impl Pose {
                 f.land_wait += dt;
                 return;
             }
-            self.land(input, side);
+            self.land(rig, input, side);
         }
     }
 
-    fn land(&mut self, input: &PoseInput, side: usize) {
+    fn land(&mut self, rig: &Rig, input: &PoseInput, side: usize) {
         let fallback = self.origin.z + self.body_floor as f64;
         let f = &mut self.feet[side];
         let floor = if (f.to.truncate() - f.to_sampled).length() < 0.05 {
@@ -1933,6 +2090,7 @@ impl Pose {
         } else {
             Self::sample_floor(input, f.to.truncate(), fallback)
         };
+        f.ground = Self::ground_pitch(rig, input, f.to.truncate(), f.to_yaw, floor);
         // (within a centimetre of where the swing brought it, or it gave up waiting)
         let floor = if (floor - f.land_z).abs() < 0.05 {
             floor
@@ -1946,13 +2104,36 @@ impl Pose {
         self.landed = true;
     }
 
+    fn ground_pitch(rig: &Rig, input: &PoseInput, at: DVec2, yaw: f64, z: f64) -> f32 {
+        if input.floor.is_none() {
+            return 0.0;
+        }
+        let (sn, cs) = yaw.to_radians().sin_cos();
+        let dir = DVec2::new(sn, cs);
+        let (h, t) = (rig.heel as f64, rig.toe as f64);
+        let zh = Self::sample_floor(input, at + dir * h, z);
+        let zt = Self::sample_floor(input, at + dir * t, z);
+        let linear = zh + (zt - zh) * (-h / (t - h));
+        if (linear - z).abs() > 0.015 || t - h < 0.05 {
+            return 0.0;
+        }
+        ((zt - zh) / (t - h)).atan().to_degrees().clamp(-25.0, 25.0) as f32
+    }
+
     /// Update the landing floor height of the swinging feet.
-    fn swing_floor(&mut self, input: &PoseInput, dt: f32) {
+    fn swing_floor(&mut self, rig: &Rig, input: &PoseInput, dt: f32) {
         let fallback = self.origin.z + self.body_floor as f64;
         for f in self.feet.iter_mut() {
             if !f.planted && (f.to.truncate() - f.to_sampled).length() > 0.05 {
                 f.to_floor = Self::sample_floor(input, f.to.truncate(), fallback);
                 f.to_sampled = f.to.truncate();
+                f.to_ground = Self::ground_pitch(rig, input, f.to_sampled, f.to_yaw, f.to_floor);
+                f.mid_floor = if input.floor.is_some() {
+                    let mid = (f.from_ankle.truncate() + f.to_sampled) * 0.5;
+                    Self::sample_floor(input, mid, fallback)
+                } else {
+                    f64::NAN
+                };
             }
             if !f.planted {
                 let gap = f.to_floor - f.land_z;
@@ -1966,6 +2147,28 @@ impl Pose {
         }
     }
 
+    fn reach_frame(&self, rig: &Rig, shoulder: Vec3, fore: Option<Vec3>) -> (Quat, Vec3) {
+        let a = self.approach;
+        let (dir, pronate) = match self.gesture {
+            Gesture::Insert => (
+                match fore {
+                    Some(f) => f * 0.6 + a * 0.4 - Vec3::Z * 0.05,
+                    None => a + (self.reach_at - shoulder).normalize_or(a) - Vec3::Z * 0.1,
+                },
+                -45.0f32,
+            ),
+            Gesture::Take => (a - Vec3::Z * 0.35, 50.0),
+            Gesture::Give => (a - Vec3::Z * 0.9, 80.0),
+            Gesture::Touch => (self.reach_at - shoulder, 45.0),
+        };
+        let dir = dir.normalize_or(Vec3::Y);
+        let medial = Vec3::Z.cross(dir).normalize_or(-Vec3::X);
+        let down = (-Vec3::Z - dir * dir.dot(-Vec3::Z)).normalize_or(-Vec3::Z);
+        let p = pronate.to_radians();
+        let palm = medial * p.cos() + down * p.sin();
+        (hand_frame(rig, dir, palm), grip_offset(rig, self.gesture))
+    }
+
     /// Bone transforms for the current state.
     pub fn bones(&mut self, rig: &Rig) -> Posed {
         let d = |deg: f32| deg.to_radians();
@@ -1976,8 +2179,6 @@ impl Pose {
         let sit = self.sit;
         let stumble = self.stumble_factor();
         let s_ease = smoothstep(0.0, 1.0, sit);
-        // hips move back first and come down later (and the other way round getting up)
-        let s_back = smoothstep(0.0, 0.75, sit);
         let s_down = smoothstep(0.2, 1.0, sit);
         let bump = (PI * sit).sin().max(0.0);
         let breath = self.breath.sin();
@@ -2008,7 +2209,7 @@ impl Pose {
                     0.0
                 };
                 toe_bend[side] = (-pitch).max(0.0);
-                (Self::stance_ankle(rig, &f, pitch), f.yaw, pitch)
+                (Self::stance_ankle(rig, &f, pitch), f.yaw, pitch + f.ground)
             } else {
                 let t = f.t.clamp(0.0, 1.0);
                 let land_pitch = if f.walk { heel_pitch(walk) } else { 0.0 };
@@ -2016,6 +2217,7 @@ impl Pose {
                     let g = Foot {
                         pos: DVec3::new(f.to.x, f.to.y, f.land_z),
                         yaw: f.to_yaw,
+                        ground: f.to_ground,
                         ..f
                     };
                     Self::stance_ankle(rig, &g, land_pitch)
@@ -2028,9 +2230,17 @@ impl Pose {
                 let rise = (land.z - f.from_ankle.z) as f32;
                 let up = smoothstep(0.0, 0.06, rise);
                 let down = smoothstep(0.0, 0.06, -rise);
-                let zt = t * (1.0 - up - down)
+                let stair = t * (1.0 - up - down)
                     + smoothstep(0.0, 0.55, t) * up
                     + smoothstep(0.35, 1.0, t) * down;
+                // (on a ramp the floor half way is half way: the foot follows it down)
+                let ramp = if f.mid_floor.is_finite() {
+                    let off = f.mid_floor - 0.5 * (f.from_floor + f.land_z);
+                    1.0 - smoothstep(0.01, 0.04, off.abs() as f32)
+                } else {
+                    0.0
+                };
+                let zt = stair + (t - stair) * ramp;
                 let bumpf = (PI * t.powf(0.75)).sin().max(0.0);
                 a.z = f.from_ankle.z
                     + (land.z - f.from_ankle.z) * zt as f64
@@ -2038,11 +2248,15 @@ impl Pose {
                 let yaw = f.from_yaw + angle_diff(f.from_yaw, f.to_yaw) * s;
                 toe_bend[side] = (-f.from_pitch).max(0.0) * (1.0 - smoothstep(0.0, 0.35, t));
                 if f.walk {
-                    swing[side] = Some((t, f.from_pitch, land_pitch));
+                    swing[side] = Some((t, f.from_pitch + f.from_ground, land_pitch + f.to_ground));
                 }
                 swing_floor[side] =
                     (f.from_floor + (f.land_z - f.from_floor) * zt as f64 - self.origin.z) as f32;
-                (a, yaw, 0.0)
+                (
+                    a,
+                    yaw,
+                    f.from_ground + (f.to_ground - f.from_ground) * s as f32,
+                )
             };
             let local = self.to_local(ankle);
             let yaw_l = angle_diff(self.heading, yaw) as f32;
@@ -2075,7 +2289,8 @@ impl Pose {
         // reaching for something far: bend at the hips and bring the right shoulder round
         let (reach_lean, reach_twist) = if self.reach > 0.0 {
             let v = self.reach_at - rig.shoulder[1];
-            let excess = (v.length() - 0.75 * (rig.upper_arm + rig.forearm)).max(0.0);
+            let arm = rig.upper_arm + rig.forearm + grip_offset(rig, self.gesture).length();
+            let excess = (v.length() - 0.9 * arm).max(0.0);
             let r = smoothstep(0.0, 1.0, self.reach);
             let yaw = v.x.atan2(v.y.max(0.05)).to_degrees();
             (
@@ -2096,7 +2311,13 @@ impl Pose {
         // in a bend), less when holding on or sitting
         let lean_bus = self.lean * (1.0 - 0.4 * self.hold) * (1.0 - 0.4 * s_ease);
         let bus_shift = Vec3::new(lean_bus.x * 0.012, lean_bus.y * 0.012, 0.0) * (1.0 - s_ease);
-        let stand_z = rig.pelvis.z - 0.004 * rig.scale - 0.012 * walk - 0.035 * rig.scale * run
+        let downhill = smoothstep(0.03, 0.25, -self.grade) * walk;
+        let uphill = smoothstep(0.03, 0.25, self.grade) * walk;
+        let stand_z = rig.pelvis.z
+            - 0.004 * rig.scale
+            - 0.012 * walk
+            - 0.035 * rig.scale * run
+            - 0.03 * rig.scale * downhill
             + 0.002 * breath * still;
         let stand_c = Vec3::new(
             lat_walk + lat_idle,
@@ -2107,13 +2328,25 @@ impl Pose {
         // then owns pelvis placement; recomputing an average offset here would put a
         // different-sized human ahead of or behind the actual seat.
         let seated_c = Vec3::new(self.seat.x, self.seat.y + 0.03, self.seat.z + rig.seat_lift);
-        let mut pc = Vec3::new(
-            stand_c.x + (seated_c.x - stand_c.x) * s_back,
-            stand_c.y + (seated_c.y - stand_c.y) * s_back,
-            stand_c.z + (seated_c.z - stand_c.z) * s_down,
-        );
-        // over the feet while getting up or down: the hips go a little lower and further
-        pc.z -= 0.05 * bump * rig.scale;
+        let hop = smoothstep(-0.06, -0.01, seated_c.z - stand_c.z);
+        let back = min_jerk(sit / 0.85) * (1.0 - hop) + min_jerk((sit - 0.3) / 0.5) * hop;
+        let down = min_jerk((sit - 0.1) / 0.8) * (1.0 - hop) + min_jerk((sit - 0.3) / 0.45) * hop;
+        let mut pc = stand_c + (seated_c - stand_c) * Vec3::new(back, back, down);
+        let crouch = (PI * ((sit - 0.05) / 0.4).clamp(0.0, 1.0)).sin();
+        let arc = (PI * ((sit - 0.3) / 0.5).clamp(0.0, 1.0)).sin();
+        pc.z -= (0.03 * bump * (1.0 - hop) + (0.06 * crouch - 0.03 * arc) * hop) * rig.scale;
+        let lean_in = if sit < 0.7 {
+            (0.5 * PI * sit / 0.7).sin()
+        } else {
+            1.0 - min_jerk((sit - 0.7) / 0.3)
+        };
+        let sit_lean = d(36.0) * lean_in * (1.0 - hop) + d(24.0) * crouch.max(arc) * hop;
+        let window = smoothstep(0.1, 0.4, sit) * (1.0 - smoothstep(0.85, 0.98, sit));
+        let brace = if self.getting_up { hop } else { 1.0 } * window;
+        let push = if self.getting_up { 1.0 - hop } else { 0.0 }
+            * smoothstep(0.3, 0.55, sit)
+            * (1.0 - smoothstep(0.75, 1.0, sit));
+        let one_hand = hop < 0.5 && self.style[3] > 0.3;
         // the pelvis never higher than the legs can reach
         let pelvis_q = Quat::from_rotation_z(pelvis_yaw)
             * Quat::from_rotation_y(pelvis_roll)
@@ -2155,8 +2388,8 @@ impl Pose {
                 * (1.0 - walk)
                 * (1.0 - self.reach)
             + reach_twist;
-        let trunk_lean = d(3.0 * walk + lean_acc)
-            + d(34.0) * bump
+        let trunk_lean = d(3.0 * walk + lean_acc + 5.0 * uphill - 3.0 * downhill)
+            + sit_lean
             + d(8.0 + 10.0 * (1.0 - self.grip)) * s_ease
             + d(0.7) * breath
             + d(lean_bus.y * 2.4)
@@ -2342,17 +2575,6 @@ impl Pose {
             let sit_w = smoothstep(0.35, 1.0, sit);
             let mut target = hang_wrist.lerp(lap, sit_w);
             let mut pole = hang_pole.normalize_or(-Vec3::Y).lerp(lap_pole, sit_w);
-            if side == 1 && self.reach > 0.0 {
-                let r = smoothstep(0.0, 1.0, self.reach);
-                let reach_to = self.reach_at;
-                // not further than the arm, and not through the body
-                let v = reach_to - sh_at;
-                let reach_to = sh_at
-                    + v.normalize_or(Vec3::Y)
-                        * v.length().min((rig.upper_arm + rig.forearm) * 0.96);
-                target = target.lerp(reach_to, r);
-                pole = pole.lerp(Vec3::new(0.6, -0.3, -1.0), r);
-            }
             if self.hold > 0.0 && !(side == 1 && self.reach > 0.3) {
                 let h = smoothstep(0.0, 1.0, self.hold);
                 let hold_side = if self.style[2] > 0.0 { 1 } else { 0 };
@@ -2387,64 +2609,186 @@ impl Pose {
                 target = target.lerp(to, g);
                 pole = pole.lerp(Vec3::new(s * 0.7, -0.2, -1.0), g);
             }
-            let (el_at, wr_at, _) = two_bone(sh_at, rig.upper_arm, rig.forearm, target, pole);
-            let a1 = (el_at - sh_at).normalize_or(-Vec3::Z);
-            let c1 = (wr_at - el_at).normalize_or(-Vec3::Z);
-            let mut f1 = c1 - a1 * a1.dot(c1);
-            if f1.length_squared() < 1e-6 {
-                f1 = pole.cross(a1).cross(a1) * -1.0;
+            // the right hand's goal: its rotation, the wrist offset to the grip, and weight
+            let mut hand_goal: Option<(Quat, Vec3, f32)> = None;
+            if side == 1 && (self.reach > 0.0 || self.stow > 0.0) {
+                let stow_q =
+                    hand_frame(rig, Vec3::new(-0.45, 0.6, 0.65), Vec3::new(-0.3, -0.6, 0.5));
+                let take_off = grip_offset(rig, Gesture::Take);
+                let w_stow = min_jerk(self.stow);
+                if w_stow > 0.0 {
+                    let stow_w = stow_point(rig) + Vec3::Z * self.body_floor - stow_q * take_off;
+                    target = target.lerp(stow_w, w_stow);
+                    pole = pole.lerp(Vec3::new(0.5, -0.6, -1.0), w_stow);
+                }
+                let mut goal = (stow_q, take_off, w_stow);
+                if self.reach > 0.0 {
+                    let a = self.approach;
+                    let (q, off) = self.reach_frame(rig, sh_at, None);
+                    let contact = self.reach_at + a * (0.05 * min_jerk(self.press));
+                    let pre = contact - a * 0.1;
+                    let r = self.reach;
+                    let e1 = min_jerk(r / 0.8);
+                    let e2 = min_jerk((r - 0.55) / 0.45);
+                    let pre_w = pre - q * off;
+                    let contact_w = contact - q * off;
+                    // (the hand swings out in an arc, not along the chest past the shoulder)
+                    let bow =
+                        a.with_z(0.0).normalize_or(Vec3::Y) * (0.5 * rig.scale * e1 * (1.0 - e1));
+                    target = target + (pre_w - target) * e1 + (contact_w - pre_w) * e2 + bow;
+                    let v = target - sh_at;
+                    target = sh_at
+                        + v.normalize_or(Vec3::Y)
+                            * v.length().min((rig.upper_arm + rig.forearm) * 0.985);
+                    // a near target tucks the elbow back against the body, a far one lets
+                    // it come forward under the arm
+                    let far = smoothstep(0.45, 0.85, v.length() / (rig.upper_arm + rig.forearm));
+                    let elbow = Vec3::new(0.2, -0.4, -1.0).lerp(Vec3::new(0.4, 0.0, -1.0), far);
+                    pole = pole.lerp(elbow, e1);
+                    let w = min_jerk(r / 0.7);
+                    let k = if goal.2 > 0.0 {
+                        w / (w + goal.2 * (1.0 - w))
+                    } else {
+                        1.0
+                    };
+                    goal = (
+                        goal.0.slerp(q, k),
+                        goal.1.lerp(off, k),
+                        w + goal.2 * (1.0 - w),
+                    );
+                }
+                hand_goal = Some(goal);
             }
-            let f1 = f1.normalize_or(Vec3::Y);
-            let bend = a1.dot(c1).clamp(-1.0, 1.0).acos();
-            let f1_fore = f1 * bend.cos() - a1 * bend.sin();
-            let a0 = rig.elbow[side] - rig.shoulder[side];
-            let c0 = rig.wrist[side] - rig.elbow[side];
-            let r_upper = bone_rot(a0, Vec3::Y, a1, f1);
-            let mut r_fore = bone_rot(c0, Vec3::Y, c1, f1_fore);
-            // Rest the palms on the thighs. The elbow's bend plane alone does
-            // not define forearm pronation and left the hands on their edges.
-            let lap_w = sit_w
-                * (1.0 - self.hold)
+            let free = (1.0 - self.hold)
                 * (1.0 - self.grip)
                 * (1.0 - if side == 1 { self.reach } else { 0.0 });
-            if lap_w > 0.0 {
-                let rest = bone_rot(c0, -Vec3::Z, c1, -Vec3::Z);
-                r_fore = Mat3A::from_quat(
-                    Quat::from_mat3a(&r_fore).slerp(Quat::from_mat3a(&rest), lap_w),
+            let brace = brace * free * if side == 0 && one_hand { 0.0 } else { 1.0 };
+            let push = push * free;
+            if brace > 0.0 {
+                let on_seat = Vec3::new(
+                    self.seat.x + s * (rig.hip[1].x + 0.08 * rig.scale),
+                    self.seat.y + 0.06 * rig.scale,
+                    self.seat.z + 0.03 * rig.scale,
                 );
+                target = target.lerp(on_seat, brace);
+                pole = pole.lerp(Vec3::new(s * 0.3, -1.0, 0.1), brace);
             }
-            // the wrist: relaxed, a little flexed towards the palm (down in the T-pose);
-            // flat for the desk
-            let hinge0 = c0
-                .normalize_or(Vec3::X)
-                .cross(-Vec3::Z)
-                .normalize_or(Vec3::Y);
-            let wrist_flex = d(10.0) * (1.0 - if side == 1 { self.reach } else { 0.0 });
-            let mut r_hand = r_fore * Mat3A::from_axis_angle(hinge0, wrist_flex);
-            if lap_w > 0.0 {
-                let along_thigh = (knee_at - hip_at).normalize_or(Vec3::Y);
-                let rest = bone_rot(rig.hand_axis[side], -Vec3::Z, along_thigh, -Vec3::Z);
-                let fore = Quat::from_mat3a(&r_fore);
-                let wrist = limit_quat(fore.inverse() * Quat::from_mat3a(&rest), d(45.0));
-                r_hand = Mat3A::from_quat(Quat::from_mat3a(&r_hand).slerp(fore * wrist, lap_w));
+            if push > 0.0 {
+                let on_knee = knee_at + thigh_up * (rig.thigh_radius + 0.02 * rig.scale)
+                    - thigh_dir * (0.1 * rig.scale);
+                target = target.lerp(on_knee, push);
+                pole = pole.lerp(Vec3::new(s * 0.9, -0.2, 0.2), push);
             }
-            if let (true, Some(frames)) = (self.grip > 0.0, self.grip_frame) {
-                // round the rim: the knuckles along it, the palm against it (the rest hand
-                // lies palm down along the forearm); the wrist bends 80 degrees at most
-                let (dir, palm) = frames[side];
-                if dir.length_squared() > 1e-6 && palm.length_squared() > 1e-6 {
-                    let want = bone_rot(c0, -Vec3::Z, dir.normalize(), palm.normalize());
-                    let q_fore = Quat::from_mat3a(&r_hand);
-                    let rel = limit_quat(q_fore.inverse() * Quat::from_mat3a(&want), d(80.0));
-                    let q = q_fore.slerp(q_fore * rel, smoothstep(0.0, 1.0, self.grip));
-                    r_hand = Mat3A::from_quat(q);
+            let mut fix = Vec3::ZERO;
+            let passes = if hand_goal.is_some() { 2 } else { 1 };
+            for pass in 0..passes {
+                let (el_at, wr_at, _) =
+                    two_bone(sh_at, rig.upper_arm, rig.forearm, target + fix, pole);
+                let a1 = (el_at - sh_at).normalize_or(-Vec3::Z);
+                let c1 = (wr_at - el_at).normalize_or(-Vec3::Z);
+                let mut f1 = c1 - a1 * a1.dot(c1);
+                if f1.length_squared() < 1e-6 {
+                    f1 = pole.cross(a1).cross(a1) * -1.0;
                 }
+                let f1 = f1.normalize_or(Vec3::Y);
+                let bend = a1.dot(c1).clamp(-1.0, 1.0).acos();
+                let f1_fore = f1 * bend.cos() - a1 * bend.sin();
+                let a0 = rig.elbow[side] - rig.shoulder[side];
+                let c0 = rig.wrist[side] - rig.elbow[side];
+                let r_upper = bone_rot(a0, Vec3::Y, a1, f1);
+                let mut r_fore = bone_rot(c0, Vec3::Y, c1, f1_fore);
+                let lap_w = sit_w * free * (1.0 - brace);
+                if lap_w > 0.0 {
+                    let rest = bone_rot(c0, -Vec3::Z, c1, -Vec3::Z);
+                    r_fore = Mat3A::from_quat(
+                        Quat::from_mat3a(&r_fore).slerp(Quat::from_mat3a(&rest), lap_w),
+                    );
+                }
+                // the wrist: relaxed, a little flexed towards the palm (down in the T-pose);
+                // flat for the desk
+                let hinge0 = c0
+                    .normalize_or(Vec3::X)
+                    .cross(-Vec3::Z)
+                    .normalize_or(Vec3::Y);
+                let wrist_flex = d(10.0);
+                if let Some((q0, off, w)) = hand_goal {
+                    let q = if pass == 0
+                        && side == 1
+                        && self.gesture == Gesture::Insert
+                        && self.reach > 0.0
+                        && self.stow == 0.0
+                    {
+                        let q = self.reach_frame(rig, sh_at, Some(c1)).0;
+                        hand_goal = Some((q, off, w));
+                        q
+                    } else {
+                        q0
+                    };
+                    let palm_to = q * -Vec3::Z;
+                    let palm_now = Vec3::from(r_fore * -Vec3A::Z);
+                    let flat = |v: Vec3| (v - c1 * c1.dot(v)).normalize_or_zero();
+                    let (p0, p1) = (flat(palm_now), flat(palm_to));
+                    if p0 != Vec3::ZERO && p1 != Vec3::ZERO {
+                        let turn = p0.cross(p1).dot(c1).atan2(p0.dot(p1));
+                        r_fore = Mat3A::from_axis_angle(c1, turn.clamp(d(-100.0), d(100.0)) * w)
+                            * r_fore;
+                    }
+                    if pass + 1 < passes {
+                        let fore = Quat::from_mat3a(&r_fore);
+                        let rel = limit_wrist(fore.inverse() * q, c0.normalize_or(Vec3::X));
+                        let hang = Quat::from_mat3a(
+                            &(r_fore * Mat3A::from_axis_angle(hinge0, wrist_flex)),
+                        );
+                        let got = hang.slerp(fore * rel, w);
+                        fix = (q0 * off - got * off) * w;
+                        continue;
+                    }
+                }
+                let mut r_hand = r_fore * Mat3A::from_axis_angle(hinge0, wrist_flex);
+                if brace > 0.0 {
+                    let flat = bone_rot(
+                        rig.hand_axis[side],
+                        -Vec3::Z,
+                        Vec3::new(s * 0.3, 1.0, 0.0),
+                        -Vec3::Z,
+                    );
+                    let fore = Quat::from_mat3a(&r_fore);
+                    let rel = limit_wrist(
+                        fore.inverse() * Quat::from_mat3a(&flat),
+                        c0.normalize_or(Vec3::X),
+                    );
+                    r_hand = Mat3A::from_quat(Quat::from_mat3a(&r_hand).slerp(fore * rel, brace));
+                }
+                if let Some((q, _, w)) = hand_goal {
+                    let fore = Quat::from_mat3a(&r_fore);
+                    let rel = limit_wrist(fore.inverse() * q, c0.normalize_or(Vec3::X));
+                    r_hand = Mat3A::from_quat(Quat::from_mat3a(&r_hand).slerp(fore * rel, w));
+                }
+                if lap_w > 0.0 {
+                    let along_thigh = (knee_at - hip_at).normalize_or(Vec3::Y);
+                    let rest = bone_rot(rig.hand_axis[side], -Vec3::Z, along_thigh, -Vec3::Z);
+                    let fore = Quat::from_mat3a(&r_fore);
+                    let wrist = limit_quat(fore.inverse() * Quat::from_mat3a(&rest), d(45.0));
+                    r_hand = Mat3A::from_quat(Quat::from_mat3a(&r_hand).slerp(fore * wrist, lap_w));
+                }
+                if let (true, Some(frames)) = (self.grip > 0.0, self.grip_frame) {
+                    // round the rim: the knuckles along it, the palm against it (the rest hand
+                    // lies palm down along the forearm); the wrist bends 80 degrees at most
+                    let (dir, palm) = frames[side];
+                    if dir.length_squared() > 1e-6 && palm.length_squared() > 1e-6 {
+                        let want = bone_rot(c0, -Vec3::Z, dir.normalize(), palm.normalize());
+                        let q_fore = Quat::from_mat3a(&r_hand);
+                        let rel = limit_quat(q_fore.inverse() * Quat::from_mat3a(&want), d(80.0));
+                        let q = q_fore.slerp(q_fore * rel, smoothstep(0.0, 1.0, self.grip));
+                        r_hand = Mat3A::from_quat(q);
+                    }
+                }
+                out_bones[UPPER[side]] = joint_xf(rig.shoulder[side], sh_at, r_upper);
+                out_bones[FORE[side]] = joint_xf(rig.elbow[side], el_at, r_fore);
+                out_bones[HAND[side]] = joint_xf(rig.wrist[side], wr_at, r_hand);
+                posed.elbow[side] = el_at;
+                posed.wrist[side] = wr_at;
             }
-            out_bones[UPPER[side]] = joint_xf(rig.shoulder[side], sh_at, r_upper);
-            out_bones[FORE[side]] = joint_xf(rig.elbow[side], el_at, r_fore);
-            out_bones[HAND[side]] = joint_xf(rig.wrist[side], wr_at, r_hand);
-            posed.elbow[side] = el_at;
-            posed.wrist[side] = wr_at;
         }
         posed.ok = out_bones.iter().all(|b| b.is_finite());
         posed.bones = if posed.ok {
@@ -2459,6 +2803,64 @@ impl Pose {
         }
         posed
     }
+}
+
+/// Seconds the hand takes to reach out, and to come back.
+const REACH_TIME: f32 = 0.8;
+
+/// Minimum-jerk easing: how a hand moves from rest to rest.
+fn min_jerk(x: f32) -> f32 {
+    let x = x.clamp(0.0, 1.0);
+    x * x * x * (10.0 - 15.0 * x + 6.0 * x * x)
+}
+
+/// A rotation of the right hand from the rest pose (palm down along `hand_axis`) to one
+/// with the fingers along `dir` and the palm facing `palm`.
+fn hand_frame(rig: &Rig, dir: Vec3, palm: Vec3) -> Quat {
+    Quat::from_mat3a(&bone_rot(
+        rig.hand_axis[1],
+        -Vec3::Z,
+        dir.normalize_or(Vec3::Y),
+        palm.normalize_or(-Vec3::Z),
+    ))
+}
+
+/// From the right wrist to where the hand holds things for `g`, rest pose: between thumb
+/// and index finger, a ticket's length beyond the finger tips for a slot.
+fn grip_offset(rig: &Rig, g: Gesture) -> Vec3 {
+    let (along, thumb) = match g {
+        Gesture::Insert => (1.1, 1.0),
+        Gesture::Take => (0.9, 1.0),
+        Gesture::Give => (0.72, 0.3),
+        Gesture::Touch => (1.0, 0.3),
+    };
+    rig.hand_axis[1] * (along * rig.hand_len) + Vec3::Y * (thumb * rig.thumb)
+        - Vec3::Z * (0.012 * rig.scale)
+}
+
+/// What a wrist can do of `q` (a rotation of the hand against the forearm, rest frame):
+/// bend 65 degrees and turn 15 about the forearm's axis.
+fn limit_wrist(q: Quat, axis: Vec3) -> Quat {
+    let q = if q.w < 0.0 { -q } else { q };
+    let v = Vec3::new(q.x, q.y, q.z);
+    let p = axis * v.dot(axis);
+    let twist = Quat::from_xyzw(p.x, p.y, p.z, q.w).normalize();
+    let twist = if twist.is_finite() {
+        twist
+    } else {
+        Quat::IDENTITY
+    };
+    let swing = q * twist.inverse();
+    limit_quat(swing, 65f32.to_radians()) * limit_quat(twist, 15f32.to_radians())
+}
+
+/// Where a ticket just taken is held up to be read (model frame, right hand).
+fn stow_point(rig: &Rig) -> Vec3 {
+    Vec3::new(
+        0.06 * rig.scale,
+        0.3 * rig.scale,
+        rig.shoulder[1].z - 0.14 * rig.scale,
+    )
 }
 
 /// How soon before lift-off a planted foot can stop pulling the body down.
@@ -3547,11 +3949,9 @@ mod tests {
             p.advance(&r, &input, 1.0 / 60.0);
         }
         let posed = p.bones(&r);
-        assert!(
-            (posed.wrist[1] - desk).length() < 0.08,
-            "wrist {:?}",
-            posed.wrist[1]
-        );
+        let tips =
+            posed.bones[HAND[1]].transform_point3(r.wrist[1] + grip_offset(&r, Gesture::Touch));
+        assert!((tips - desk).length() < 0.03, "finger tips {tips:?}");
         assert!(p.head.x < -20.0, "head yaw {}", p.head.x);
     }
 
@@ -3658,6 +4058,138 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_ticket_goes_into_the_slot_and_comes_out_again() {
+        let r = rig();
+        let mut p = Pose::new(3);
+        let slot = Vec3::new(0.15, 0.55, 1.3);
+        let dt = 1.0 / 60.0;
+        let mut deepest = 0.0f32;
+        for _ in 0..90 {
+            let input = PoseInput {
+                reach: Some(slot),
+                gesture: Gesture::Insert,
+                approach: Some(Vec3::Y),
+                ..Default::default()
+            };
+            p.advance(&r, &input, dt);
+            let posed = p.bones(&r);
+            let grip = posed.bones[HAND[1]]
+                .transform_point3(r.wrist[1] + grip_offset(&r, Gesture::Insert));
+            deepest = deepest.max(grip.y - slot.y);
+            let palm = Vec3::from(posed.bones[HAND[1]].matrix3 * -Vec3A::Z);
+            if p.reach >= 1.0 {
+                assert!((grip - slot).truncate().length() < 0.06, "grip {grip:?}");
+                assert!(palm.x < -0.4 && palm.z > 0.4, "palm {palm:?}");
+            }
+        }
+        assert!(deepest > 0.03, "pushed in {deepest}");
+        for _ in 0..90 {
+            p.advance(&r, &PoseInput::default(), dt);
+        }
+        let posed = p.bones(&r);
+        assert!(p.reach == 0.0 && p.press == 0.0);
+        assert!(
+            posed.wrist[1].z < r.hip[1].z + 0.15,
+            "hand down {:?}",
+            posed.wrist[1]
+        );
+    }
+
+    #[test]
+    fn a_ticket_taken_is_held_up_and_looked_at() {
+        let r = rig();
+        let mut p = Pose::new(4);
+        let tray = Vec3::new(-0.05, 0.4, 1.05);
+        let dt = 1.0 / 60.0;
+        for _ in 0..70 {
+            let input = PoseInput {
+                reach: Some(tray),
+                gesture: Gesture::Take,
+                ..Default::default()
+            };
+            p.advance(&r, &input, dt);
+        }
+        let mut held = 0.0f32;
+        let mut down = 0.0f32;
+        for _ in 0..90 {
+            p.advance(&r, &PoseInput::default(), dt);
+            held = held.max(p.bones(&r).wrist[1].z);
+            down = down.min(p.head.y);
+        }
+        assert!(held > r.shoulder[1].z - 0.4, "held at {held}");
+        assert!(down < -15.0, "looked down {down}");
+    }
+
+    #[test]
+    fn downhill_steps_are_shorter_and_the_feet_lie_on_the_slope() {
+        let r = rig();
+        let steps = |grade: f64| {
+            let floor = move |at: DVec2| Some(-grade * at.y);
+            let mut p = Pose::new(6);
+            let mut pos = DVec3::ZERO;
+            let (dt, mut n, mut pitch) = (1.0 / 60.0, 0, 0.0f32);
+            for _ in 0..480 {
+                pos.y += 1.3 * dt as f64;
+                pos.z = -grade * pos.y;
+                let input = PoseInput {
+                    activity: Activity::Walk,
+                    origin: pos,
+                    velocity: DVec2::new(0.0, 1.3),
+                    floor: Some(&floor),
+                    ..Default::default()
+                };
+                p.advance(&r, &input, dt);
+                p.bones(&r);
+                n += p.landed() as u32;
+                if p.feet[0].planted {
+                    pitch = p.feet[0].ground;
+                }
+            }
+            (n, pitch)
+        };
+        let (flat, _) = steps(0.0);
+        let (down, pitch) = steps(0.25);
+        assert!(
+            down as f32 > flat as f32 * 1.25,
+            "{flat} steps flat, {down} downhill"
+        );
+        let slope = -(0.25f32).atan().to_degrees();
+        assert!(
+            (pitch - slope).abs() < 2.0,
+            "foot pitch {pitch}, slope {slope}"
+        );
+    }
+
+    #[test]
+    fn a_seat_as_high_as_the_hips_is_hopped_onto_with_the_hands() {
+        let r = rig_at_scale(0.75);
+        let mut p = Pose::new(8);
+        let seat = Vec3::new(0.0, -r.seat_front(), r.hip[1].z - 0.02);
+        let (dt, mut braced, mut lifted) = (1.0 / 60.0, false, 0.0f32);
+        p.advance(&r, &PoseInput::default(), dt);
+        for _ in 0..150 {
+            let input = PoseInput {
+                activity: Activity::Sit,
+                seat: Some(seat),
+                ..Default::default()
+            };
+            p.advance(&r, &input, dt);
+            let posed = p.bones(&r);
+            braced |= (0..2).all(|k| (posed.wrist[k].z - seat.z).abs() < 0.12)
+                && posed.wrist.iter().all(|w| w.y < 0.0);
+            lifted = lifted.max(posed.sole[0].min(posed.sole[1]));
+        }
+        let posed = p.bones(&r);
+        let hips = (posed.hip[0] + posed.hip[1]) * 0.5;
+        assert!(braced, "the hands never went onto the seat");
+        assert!(
+            (hips.z - (seat.z + r.seat_lift)).abs() < 0.05,
+            "hips {hips:?}"
+        );
+        assert!(lifted > 0.05, "the feet stayed down: {lifted}");
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use super::{
     BusAtStops, Complaint, Doorway, Movement, OUTSIDE_ROOM, Obstruction, Posture, SeatApproach,
-    Task, TicketAction, wrap,
+    SeatFloor, Task, TicketAction, wrap, yaw_of,
 };
 use crate::humans::{BusId, BusNow, Cabin, Humans, State, debug_pax, prefer_seated_places};
 use crate::scene::World;
@@ -67,6 +67,9 @@ impl Humans {
         self.pax_mut(i).unwrap().task = t;
         if t != Task::SittingInBus {
             self.pax_mut(i).unwrap().seat_approach = None;
+        }
+        if t != Task::SittingInBus && t != Task::InBusToExit {
+            self.pax_mut(i).unwrap().seat_floor = None;
         }
         match t {
             Task::WaitingForBus => {
@@ -165,7 +168,9 @@ impl Humans {
                 if let (Some(s), Some(k)) = (stop, spot) {
                     self.free_spot(s, k);
                 }
-                self.pax_mut(i).unwrap().spot = None;
+                let p = self.pax_mut(i).unwrap();
+                p.spot = None;
+                p.door_wait = 0.0;
                 self.choose_entry(i, buses, bus_ix);
                 let p = self.pax_mut(i).unwrap();
                 p.target_bus = true;
@@ -187,7 +192,7 @@ impl Humans {
                 p.door = None;
                 // into the bus's frame
                 let mut local = bn.to_local(p.pos);
-                let door_entry = door_idx.and_then(|d| bn.cabin.entries.get(d));
+                let door_entry = door_idx.and_then(|d| bn.cabin.boarding_door(d));
                 let entry_pt = door_entry.and_then(|e| e.point);
                 let pt = entry_pt
                     .or_else(|| bn.cabin.omsi_nearest(local, &all, false, false, None, None));
@@ -366,6 +371,13 @@ impl Humans {
                                     target: floor,
                                     yaw: r,
                                 });
+                                p.seat_floor =
+                                    ((floor.z - p.pos.z).abs() > 0.03).then(|| SeatFloor {
+                                        center: floor.truncate(),
+                                        radius: SEAT_FLOOR_RADIUS,
+                                        z: floor.z,
+                                        around: p.pos.z,
+                                    });
                                 p.posture = Posture::Standing;
                             } else {
                                 p.pos = (s.pos - Vec3::Z * seatheight).as_dvec3();
@@ -394,28 +406,43 @@ impl Humans {
         };
         let p = self.pax_mut(i).unwrap();
         p.moved = 0.0;
-        p.speed = 0.0;
-        let turn = wrap(approach.yaw - p.yaw);
-        let turn_step = 1.5 * dt as f64;
-        p.yaw = wrap(p.yaw + turn.clamp(-turn_step, turn_step));
-        if turn.abs() > turn_step {
-            p.movement = Movement::Turning;
+        // walk there facing the way (stepping up onto a podium on the way), then turn
+        // round with the back to the seat
+        let delta = (approach.target - p.pos).truncate();
+        let distance = delta.length();
+        if distance > 0.02 {
+            let dh = wrap(yaw_of(delta) - p.yaw);
+            p.yaw = wrap(
+                p.yaw + dh.signum() * (dh.abs() * (dt as f64 / 0.12).min(1.0)).min(2.3 * dt as f64),
+            );
+            let want =
+                (0.7f32).min((4.0 * distance as f32).sqrt() + 0.1) * (dh.cos() as f32).max(0.0);
+            let diff = want - p.speed;
+            let rate = if diff < 0.0 { 3.0 } else { 1.8 };
+            p.speed += diff.signum() * diff.abs().min(rate * dt);
+            let step = (p.speed.max(0.0) * dt) as f64;
+            let step = step.min(distance);
+            let flat = p.pos.truncate() + delta * (step / distance);
+            let z = match p.seat_floor {
+                Some(f) => f.at(flat),
+                None => p.pos.z + (approach.target.z - p.pos.z) * (step / distance),
+            };
+            p.pos = DVec3::new(flat.x, flat.y, z);
+            p.moved = step as f32;
+            p.movement = Movement::ToTarget;
             return true;
         }
-        let delta = approach.target - p.pos;
-        let distance = delta.length();
-        let step = distance.min(0.5 * dt as f64);
-        if distance > 1e-9 {
-            p.pos += delta * (step / distance);
-        }
-        p.moved = step as f32;
-        p.speed = if dt > 0.0 { step as f32 / dt } else { 0.0 };
-        p.movement = Movement::ToTarget;
-        if distance <= step {
+        p.pos = approach.target;
+        p.speed = 0.0;
+        let turn = wrap(approach.yaw - p.yaw);
+        let turn_step = 2.2 * dt as f64;
+        p.yaw = wrap(p.yaw + turn.clamp(-turn_step, turn_step));
+        p.movement = Movement::Turning;
+        if turn.abs() <= turn_step {
+            p.yaw = approach.yaw;
             p.seat_approach = None;
             p.movement = Movement::Standing;
             p.posture = Posture::Sitting;
-            p.speed = 0.0;
         }
         true
     }
@@ -441,48 +468,74 @@ impl Humans {
             .seat
             .and_then(|k| bn.cabin.seats.get(k))
             .and_then(|s| s.point);
+        let reachable =
+            |from: usize, to: usize| from == to || bn.cabin.route_next(from, to).is_some();
+        let buyer = p.ticket == TicketAction::Buy;
+        let sale = bn.cabin.sale.and_then(|s| s.0);
         for entry in &mut list {
             if let Some(from) = *entry {
-                let reachable = |to| from == to || bn.cabin.route_next(from, to).is_some();
-                if seat.is_some_and(|to| !reachable(to))
-                    || (p.ticket == TicketAction::Buy
-                        && bn
-                            .cabin
-                            .sale
-                            .and_then(|s| s.0)
-                            .is_some_and(|to| !reachable(to)))
+                if seat.is_some_and(|to| !reachable(from, to))
+                    || (buyer && sale.is_some_and(|to| !reachable(from, to)))
                 {
                     *entry = None;
                 }
             }
         }
-        let flags = bn.cabin.entry_flags();
-        let open: Vec<bool> = (0..list.len())
-            .map(|k| bn.entry_open.get(k).copied().unwrap_or(false))
-            .collect();
+        let mut flags = bn.cabin.entry_flags();
+        let mut open: Vec<bool> = (0..list.len()).map(|k| bn.boarding_open(k)).collect();
         let pt = if self.natural {
-            let queue = self.door_queues(i, bn.id, list.len());
-            least_busy_entry(
-                &bn.cabin.graph.points,
-                here,
-                &list,
-                p.ticket == TicketAction::Buy,
-                &flags,
-                &open,
-                &queue,
-            )
+            let stamper = bn
+                .cabin
+                .stamper
+                .and_then(|s| s.0)
+                .filter(|_| p.ticket == TicketAction::Stamp);
+            if !buyer {
+                for (k, exit) in bn.cabin.exits.iter().enumerate() {
+                    list.push(exit.point.filter(|&from| {
+                        bn.cabin.entries.iter().all(|e| e.point != Some(from))
+                            && seat.is_none_or(|to| reachable(from, to))
+                            && stamper.is_none_or(|to| reachable(from, to))
+                    }));
+                    flags.push((true, exit.button));
+                    open.push(bn.exit_open.get(k).copied().unwrap_or(false));
+                }
+            }
+            let mut queue = self.door_queues(i, bn.id, list.len());
+            let entries = bn.cabin.entries.len();
+            for (door, cost) in queue.iter_mut().enumerate().skip(entries) {
+                *cost += 2.0 * self.alighting_through(bn.id, door - entries) as f32;
+            }
+            if let Some(to) = stamper {
+                let inside = bn.cabin.graph.distances_from(to);
+                for (cost, pt) in queue.iter_mut().zip(&list) {
+                    *cost += pt
+                        .and_then(|pt| inside.get(pt).copied())
+                        .filter(|d| d.is_finite())
+                        .unwrap_or(0.0);
+                }
+            }
+            let pick = |flags: &[(bool, bool)]| {
+                least_busy_entry(
+                    &bn.cabin.graph.points,
+                    here,
+                    &list,
+                    buyer,
+                    flags,
+                    &open,
+                    &queue,
+                )
+            };
+            let only_open: Vec<(bool, bool)> = flags.iter().map(|f| (f.0, false)).collect();
+            (p.door_wait >= 5.0)
+                .then(|| pick(&only_open))
+                .flatten()
+                .or_else(|| pick(&flags))
         } else {
             None
         }
         .or_else(|| {
-            bn.cabin.omsi_nearest(
-                here,
-                &list,
-                p.ticket == TicketAction::Buy,
-                false,
-                Some(&flags),
-                Some(&open),
-            )
+            bn.cabin
+                .omsi_nearest(here, &list, buyer, false, Some(&flags), Some(&open))
         });
         let p = self.pax_mut(i).unwrap();
         if let Some(q) = pt.and_then(|k| bn.cabin.graph.points.get(k)) {
@@ -520,6 +573,18 @@ impl Humans {
             queue[door] -= 1.5;
         }
         queue
+    }
+
+    pub(in crate::humans) fn alighting_through(&self, bus: BusId, exit: usize) -> usize {
+        self.people
+            .iter()
+            .filter(|person| {
+                matches!(&person.state, State::Pax(pax)
+                    if pax.inside == Some(bus)
+                        && pax.task == Task::InBusToExit
+                        && pax.door == Some(exit))
+            })
+            .count()
     }
 
     /// sub_62a628: along the paths to the place reserved.
@@ -614,6 +679,7 @@ impl Humans {
     pub(in crate::humans) fn task_to_bus(
         &mut self,
         i: usize,
+        dt: f32,
         buses: &[BusNow],
         bus_ix: &HashMap<BusId, usize>,
         world: &World,
@@ -625,13 +691,10 @@ impl Humans {
         };
         let door_x = p
             .door
-            .and_then(|d| bn.cabin.entries.get(d))
+            .and_then(|d| bn.cabin.boarding_door(d))
             .map(|e| e.inside.x)
             .unwrap_or(0.0);
-        let open = p
-            .door
-            .map(|d| bn.entry_open.get(d).copied().unwrap_or(false))
-            .unwrap_or(false);
+        let open = p.door.is_some_and(|d| bn.boarding_open(d));
         {
             let pp = self.pax_mut(i).unwrap();
             pp.clamp = true;
@@ -670,20 +733,22 @@ impl Humans {
                 return;
             }
             if p.movement != Movement::AtTarget {
+                if self.natural && p.movement == Movement::ShortOfTarget && !open {
+                    self.pax_mut(i).unwrap().door_wait += dt;
+                }
                 self.choose_entry(i, buses, bus_ix);
                 if self.pax(i).unwrap().door.is_none() {
                     self.pax_mut(i).unwrap().movement = Movement::Standing;
                     self.people[i].why = "no reachable entry";
                     return;
                 }
-                let open = self
-                    .pax(i)
-                    .unwrap()
-                    .door
-                    .map(|d| bn.entry_open.get(d).copied().unwrap_or(false))
-                    .unwrap_or(false);
+                let door = self.pax(i).unwrap().door;
+                let open = door.is_some_and(|d| bn.boarding_open(d));
+                let let_off_first = door
+                    .and_then(|d| d.checked_sub(bn.cabin.entries.len()))
+                    .is_some_and(|exit| self.alighting_through(bn.id, exit) > 0);
                 let pp = self.pax_mut(i).unwrap();
-                pp.short = !open;
+                pp.short = !open || let_off_first;
                 pp.movement = Movement::ToTarget;
                 pp.posture = Posture::Walking;
                 return;
@@ -926,3 +991,6 @@ mod tests {
         );
     }
 }
+
+/// How far round the feet's place in front of a seat its own floor reaches.
+const SEAT_FLOOR_RADIUS: f64 = 0.35;

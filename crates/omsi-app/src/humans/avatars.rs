@@ -696,13 +696,8 @@ impl Humans {
             velocity: p.vel,
             seat: seat_pos,
             look: None,
-            reach: None,
-            grips: None,
-            grip_frames: None,
-            grip_lean: 0.0,
-            hold: 0.0,
-            sway: glam::Vec2::ZERO,
             floor: Some(&floor_cb),
+            ..Default::default()
         };
         p.pose.advance(&p.ty.rig, &pose_in, dt);
         p.finish_animation(self.ik, &input);

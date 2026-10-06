@@ -10,6 +10,7 @@ pub mod host;
 pub mod htmlengine;
 pub mod htmltex;
 pub mod human;
+mod human_lod;
 pub mod human_omsi;
 pub mod ibis;
 pub mod input;

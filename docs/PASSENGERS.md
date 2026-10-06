@@ -28,6 +28,12 @@ Rendering and procedural poses do not own passenger simulation state. `pax_motio
 natural or OMSI-style movement; `pax_ik` independently selects procedural or OMSI animation
 poses. RealisticPax models are optional and load only when installed and selected.
 
+Natural movement lets passengers who buy nothing from the driver board at `[exit]` doors
+too: open ones, or shut ones whose outside button the script reads as the next
+`PAX_Entry<n>_Req` after the cabin's entries. They let people off first and give up a
+shut door after 5 s for an open one. Ticket buyers keep to the selling entries; OMSI-style
+movement keeps OMSI's entry-only choice.
+
 Run focused and workspace tests with:
 
 ```powershell

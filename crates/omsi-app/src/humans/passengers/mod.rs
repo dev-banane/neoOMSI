@@ -100,7 +100,10 @@ impl Humans {
             ai_req.insert(
                 bn.id,
                 (
-                    vec![false; bn.cabin.entries.len()],
+                    vec![
+                        false;
+                        bn.cabin.entries.len() + bn.cabin.exits.len() * self.natural as usize
+                    ],
                     vec![false; bn.cabin.exits.len()],
                 ),
             );
@@ -340,7 +343,7 @@ impl Humans {
                     self.set_task(i, Task::WalkingToBusstop, buses, bus_ix, world);
                 }
             }
-            Task::WalkingToBus => self.task_to_bus(i, buses, bus_ix, world),
+            Task::WalkingToBus => self.task_to_bus(i, dt, buses, bus_ix, world),
             Task::InBusToPlace => self.task_to_place(
                 i,
                 buses,

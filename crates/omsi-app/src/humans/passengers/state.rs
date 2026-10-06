@@ -38,6 +38,7 @@ pub(in crate::humans) struct Pax {
     /// Receipt for a grant accepted in the current LAN session, distinct from a local id.
     pub accepted_transfer: Option<u64>,
     pub seat_approach: Option<SeatApproach>,
+    pub seat_floor: Option<SeatFloor>,
     pub doorway: Option<Doorway>,
     pub task: Task,
     /// Movement state +0x6c4: 0 stand, 1 to the target, 2 0.7 m short of it, 3 there, 5
@@ -137,6 +138,7 @@ impl Pax {
         Pax {
             accepted_transfer: None,
             seat_approach: None,
+            seat_floor: None,
             doorway: None,
             task: Task::Nothing,
             movement: Movement::Standing,
@@ -211,11 +213,29 @@ pub(in crate::humans) struct Doorway {
     pub stop: Option<i64>,
 }
 
-/// Align the foot root before the procedural pelvis settles onto a seat.
+/// Walk to the place in front of a seat, turn round, and sit down.
 #[derive(Debug, Clone, Copy)]
 pub(in crate::humans) struct SeatApproach {
     pub target: DVec3,
     pub yaw: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(in crate::humans) struct SeatFloor {
+    pub center: glam::DVec2,
+    pub radius: f64,
+    pub z: f64,
+    pub around: f64,
+}
+
+impl SeatFloor {
+    pub(in crate::humans) fn at(&self, p: glam::DVec2) -> f64 {
+        if (p - self.center).length() < self.radius {
+            self.z
+        } else {
+            self.around
+        }
+    }
 }
 
 /// The room height outside a vehicle (+0x668 = 50).

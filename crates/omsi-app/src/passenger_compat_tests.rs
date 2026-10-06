@@ -1746,6 +1746,7 @@ fn complete_journey(fare: TicketAction) {
     }
     let mut b = bus(c);
     b.entry_open[0] = false;
+    b.exit_open = vec![false; 2];
     Arc::get_mut(&mut b.cabin).unwrap().entries[0].button = true;
     h.tickets = Some(Arc::new(omsi_content::tickets::TicketPack {
         stamper_prop: if fare == TicketAction::Stamp {
@@ -1863,6 +1864,7 @@ fn complete_journey(fare: TicketAction) {
             vec![]
         }
     );
+    b.exit_open = vec![true; 2];
     regs.get_mut(&b.id).unwrap().next = Some(2);
     regs.get_mut(&b.id).unwrap().at = None;
     tick(&mut h, &b, &regs);
@@ -2251,6 +2253,104 @@ fn a_host_keeps_transfers_until_ack_and_restores_them_on_disconnect() {
     assert!(!h.stops[&1].taken[0]);
 }
 
+fn boarder_at_exit_door(f: &Fixture, h: &mut Humans, b: &BusNow, ticket: TicketAction) {
+    let mut p = Pax::new(1.1);
+    p.task = Task::WalkingToBus;
+    p.bus = Some(b.id);
+    p.seat = Some(1);
+    p.stop = Some(1);
+    p.ticket = ticket;
+    p.pos = DVec3::new(2.0, 3.0, 0.0);
+    let mut s = stop(DVec3::ZERO, 0.0, "Test");
+    s.buses.push((b.id, true));
+    h.stops.insert(1, s);
+    h.people.push(f.person(7, State::Pax(Box::new(p)), false));
+}
+
+#[test]
+fn natural_riders_without_a_purchase_board_at_an_open_exit_but_buyers_keep_the_desk() {
+    let f = Fixture::new();
+    let b = bus(cabin());
+    let ix = [(b.id, 0)].into_iter().collect();
+    let exit_door = b.cabin.entries.len() + 1;
+    for (natural, ticket, door) in [
+        (true, TicketAction::None, exit_door),
+        (true, TicketAction::Stamp, exit_door),
+        (true, TicketAction::Buy, 0),
+        (false, TicketAction::None, 0),
+    ] {
+        let mut h = Humans::new(&f.root);
+        h.set_natural(natural);
+        boarder_at_exit_door(&f, &mut h, &b, ticket);
+        h.choose_entry(0, std::slice::from_ref(&b), &ix);
+        assert_eq!(h.pax(0).unwrap().door, Some(door), "{natural} {ticket:?}");
+    }
+
+    let mut h = Humans::new(&f.root);
+    boarder_at_exit_door(&f, &mut h, &b, TicketAction::None);
+    h.choose_entry(0, std::slice::from_ref(&b), &ix);
+    h.pax_mut(0).unwrap().movement = Movement::AtTarget;
+    h.task_to_bus(0, 0.05, std::slice::from_ref(&b), &ix, &f.world);
+    let p = h.pax(0).unwrap();
+    assert_eq!(
+        (p.task, p.inside, p.pt),
+        (Task::InBusToPlace, Some(b.id), Some(3))
+    );
+}
+
+#[test]
+fn natural_exit_boarders_let_people_off_first() {
+    let f = Fixture::new();
+    let mut h = Humans::new(&f.root);
+    let b = bus(cabin());
+    let ix = [(b.id, 0)].into_iter().collect();
+    boarder_at_exit_door(&f, &mut h, &b, TicketAction::None);
+    let mut off = Pax::new(1.1);
+    off.task = Task::InBusToExit;
+    off.inside = Some(b.id);
+    off.bus = Some(b.id);
+    off.door = Some(1);
+    h.people.push(f.person(8, State::Pax(Box::new(off)), false));
+    h.task_to_bus(0, 0.05, std::slice::from_ref(&b), &ix, &f.world);
+    assert!(h.pax(0).unwrap().short, "waits beside the open exit");
+    h.people.pop();
+    h.task_to_bus(0, 0.05, std::slice::from_ref(&b), &ix, &f.world);
+    assert!(!h.pax(0).unwrap().short);
+}
+
+#[test]
+fn a_shut_exit_with_an_outside_button_is_requested_then_given_up_for_an_open_door() {
+    let f = Fixture::new();
+    let mut h = Humans::new(&f.root);
+    let mut c = cabin();
+    Arc::get_mut(&mut c).unwrap().exits[1].button = true;
+    let mut b = bus(c);
+    b.exit_open = vec![false; 2];
+    let ix = [(b.id, 0)].into_iter().collect();
+    let exit_door = b.cabin.entries.len() + 1;
+    boarder_at_exit_door(&f, &mut h, &b, TicketAction::None);
+    h.buses
+        .pax_req
+        .insert(b.id, (vec![false; exit_door + 1], vec![false; 2]));
+    let mut requested = false;
+    for _ in 0..4 {
+        h.pax_mut(0).unwrap().movement = Movement::ShortOfTarget;
+        h.task_to_bus(0, 1.0, std::slice::from_ref(&b), &ix, &f.world);
+        assert_eq!(h.pax(0).unwrap().door, Some(exit_door));
+        requested |= h.buses.pax_req[&b.id].0[exit_door];
+    }
+    assert!(requested, "the outside button reaches PAX_Entry<n>_Req");
+    for _ in 0..2 {
+        h.pax_mut(0).unwrap().movement = Movement::ShortOfTarget;
+        h.task_to_bus(0, 1.0, std::slice::from_ref(&b), &ix, &f.world);
+    }
+    assert_eq!(
+        h.pax(0).unwrap().door,
+        Some(0),
+        "gives up for the open entry"
+    );
+}
+
 #[test]
 fn closing_a_door_at_arrival_never_boards_through_it() {
     let f = Fixture::new();
@@ -2269,13 +2369,13 @@ fn closing_a_door_at_arrival_never_boards_through_it() {
     h.stops.insert(1, s);
     h.people.push(f.person(7, State::Pax(Box::new(p)), false));
     let ix = [(b.id, 0)].into_iter().collect();
-    h.task_to_bus(0, &[b.clone()], &ix, &f.world);
+    h.task_to_bus(0, 0.05, &[b.clone()], &ix, &f.world);
     assert_eq!(h.pax(0).unwrap().task, Task::WalkingToBus);
     assert_eq!(h.pax(0).unwrap().inside, None);
     b.entry_open[0] = true;
-    h.task_to_bus(0, &[b.clone()], &ix, &f.world);
+    h.task_to_bus(0, 0.05, &[b.clone()], &ix, &f.world);
     h.pax_mut(0).unwrap().movement = Movement::AtTarget;
-    h.task_to_bus(0, &[b], &ix, &f.world);
+    h.task_to_bus(0, 0.05, &[b], &ix, &f.world);
     assert_eq!(h.pax(0).unwrap().inside, Some(BusId::Player));
 }
 
@@ -2458,6 +2558,7 @@ fn left_hand_entries_use_the_cabins_own_side() {
     h.people.push(f.person(7, State::Pax(Box::new(p)), false));
     h.task_to_bus(
         0,
+        0.05,
         &[b.clone()],
         &[(b.id, 0)].into_iter().collect(),
         &f.world,

@@ -126,6 +126,18 @@ impl Humans {
                 self.route_to_place(i, bn);
                 return;
             } else {
+                let stand = bn.cabin.stamper.and_then(|(_, dev)| {
+                    let from = p.pos;
+                    let ahead = (dev.as_dvec3() - from).truncate().normalize_or_zero();
+                    let spot = self.people[i]
+                        .ty
+                        .rig
+                        .reach_spot((dev.z as f64 - from.z) as f32)
+                        .as_dvec2();
+                    let right = glam::DVec2::new(ahead.y, -ahead.x);
+                    let at = dev.as_dvec3().truncate() - ahead * spot.y - right * spot.x;
+                    ((at - from.truncate()).dot(ahead) > 0.08).then(|| at.extend(from.z))
+                });
                 let pp = self.pax_mut(i).unwrap();
                 pp.movement = Movement::Turning;
                 pp.smooth = true;
@@ -135,9 +147,20 @@ impl Humans {
                         pp.target_bus = true;
                         pp.reach_at = dev;
                     }
-                    pp.timer = 1.0;
-                    pp.reach = true;
                     pp.fare_phase = FarePhase::Validating;
+                    match stand {
+                        Some(at) => {
+                            pp.target = at;
+                            pp.movement = Movement::ToTarget;
+                            pp.short = false;
+                            pp.timer = 30.0;
+                            pp.reach = false;
+                        }
+                        None => {
+                            pp.timer = STAMP_TIME;
+                            pp.reach = true;
+                        }
+                    }
                 } else {
                     pp.fare_phase = FarePhase::RequestTicket;
                     if let Some(m) = bn.cabin.money_point {
@@ -150,7 +173,18 @@ impl Humans {
         }
         let p = self.pax(i).unwrap().clone();
         if p.ticket == TicketAction::Stamp {
-            if p.fare_phase == FarePhase::Validating && p.timer < 0.5 {
+            if p.fare_phase == FarePhase::Validating
+                && !p.reach
+                && p.timer > STAMP_TIME
+                && p.movement == Movement::AtTarget
+            {
+                let pp = self.pax_mut(i).unwrap();
+                pp.movement = Movement::Turning;
+                pp.target = pp.reach_at.as_dvec3();
+                pp.target_bus = true;
+                pp.reach = true;
+                pp.timer = STAMP_TIME;
+            } else if p.fare_phase == FarePhase::Validating && p.timer < STAMP_RELEASE {
                 // the validator stamps
                 self.stamped.push(bn.id);
                 let pp = self.pax_mut(i).unwrap();
@@ -250,7 +284,7 @@ impl Humans {
             self.desk.pardon_max = 0;
             let pp = self.pax_mut(i).unwrap();
             pp.talking = true;
-            pp.timer = 0.5;
+            pp.timer = HAND_TIME;
             pp.reach = true;
             pp.fare_phase = FarePhase::Paying;
             pp.paid = 0.0;
@@ -284,7 +318,7 @@ impl Humans {
             // the ticket: the hand to where it comes out
             let pp = self.pax_mut(i).unwrap();
             pp.fare_phase = FarePhase::TakingTicket;
-            pp.timer = 0.5;
+            pp.timer = HAND_TIME;
             pp.reach = true;
             if let Some((_, t)) = bn.cabin.sale {
                 pp.reach_at = t;
@@ -316,7 +350,7 @@ impl Humans {
         {
             let pp = self.pax_mut(i).unwrap();
             pp.fare_phase = FarePhase::TakingChange;
-            pp.timer = 0.5;
+            pp.timer = HAND_TIME;
             pp.reach = true;
             pp.bad_change = many;
             if let Some(c) = bn.cabin.change_point {
@@ -423,3 +457,7 @@ mod tests {
         );
     }
 }
+
+const STAMP_TIME: f32 = 2.0;
+const STAMP_RELEASE: f32 = 0.6;
+const HAND_TIME: f32 = 1.1;

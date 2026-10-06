@@ -694,6 +694,14 @@ impl BusNow {
     pub(super) fn heading_at(&self, local: Vec3) -> f64 {
         train_heading(self.heading, &self.trailers, local)
     }
+    pub(super) fn boarding_open(&self, door: usize) -> bool {
+        match door.checked_sub(self.cabin.entries.len()) {
+            None => self.entry_open.get(door),
+            Some(exit) => self.exit_open.get(exit),
+        }
+        .copied()
+        .unwrap_or(false)
+    }
     pub(super) fn fwd(&self) -> DVec2 {
         let h = self.heading.to_radians();
         DVec2::new(h.sin(), h.cos())
@@ -757,7 +765,16 @@ impl Humans {
         if let Some(c) = self.buses.cabins.get(&key) {
             return c.clone();
         }
-        let cabin = Cabin::load_train(&parts).map(Arc::new);
+        let cabin = Cabin::load_train(&parts).map(|mut c| {
+            let entries = c.entries.len();
+            for (k, exit) in c.exits.iter_mut().enumerate() {
+                exit.button =
+                    v.ty.program
+                        .var(&format!("PAX_Entry{}_Req", entries + k))
+                        .is_some_and(|id| v.ty.program.reads(id));
+            }
+            Arc::new(c)
+        });
         if let Some(c) = cabin.as_ref().filter(|c| c.parts.len() > 1) {
             log::info!(
                 "passenger cabin of {}: {} sections joined ({} places, {} entries, {} exits, {} path points)",

@@ -244,6 +244,11 @@ impl Cabin {
     pub(in crate::humans) fn entry_points(&self) -> Vec<Option<usize>> {
         self.entries.iter().map(|e| e.point).collect()
     }
+    pub(in crate::humans) fn boarding_door(&self, door: usize) -> Option<&Door> {
+        self.entries
+            .get(door)
+            .or_else(|| self.exits.get(door.checked_sub(self.entries.len())?))
+    }
     #[cfg(test)]
     pub(in crate::humans) fn exit_points(&self) -> Vec<Option<usize>> {
         self.exits.iter().map(|e| e.point).collect()

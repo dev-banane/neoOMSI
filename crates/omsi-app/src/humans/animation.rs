@@ -2,7 +2,11 @@ use super::{BusId, BusNow, Humans, Person, Place, PuppetMode, State, Task, model
 use crate::{ambience, scene::World};
 use glam::{DVec2, DVec3, Vec3};
 use hashbrown::HashMap;
-use omsi_sim::{crowd, human::Activity, human_omsi::AnimInput};
+use omsi_sim::{
+    crowd,
+    human::{Activity, Gesture},
+    human_omsi::AnimInput,
+};
 
 fn active_footstep(procedural: bool, valid: bool, landed: bool, legacy_step: bool) -> bool {
     if procedural && valid {
@@ -91,6 +95,8 @@ impl Humans {
             let mut ik_look: Option<Vec3> = None;
             let mut ik_reach: Option<Vec3> = None;
             let mut ik_hold = 0.0;
+            let mut ik_gesture = Gesture::Touch;
+            let mut seat_floor = None;
             let mut facing: Option<f64> = None;
 
             let (mut input, footstep) = match &p.state {
@@ -119,7 +125,16 @@ impl Humans {
                     };
                     if x.reach && x.inside.is_some() {
                         ik_reach = Some(to_model(x.reach_at.as_dvec3()));
+                        ik_gesture = match x.fare_phase {
+                            pax::FarePhase::Validating => Gesture::Insert,
+                            pax::FarePhase::RequestTicket | pax::FarePhase::Paying => Gesture::Give,
+                            pax::FarePhase::TakingTicket | pax::FarePhase::TakingChange => {
+                                Gesture::Take
+                            }
+                            _ => Gesture::Touch,
+                        };
                     }
+                    seat_floor = x.seat_floor.filter(|_| x.inside.is_some());
                     if x.look_driver {
                         if let Some(b) = bn {
                             ik_look =
@@ -307,7 +322,7 @@ impl Humans {
             let is_bus = matches!(p.place, Place::Bus(..));
             let floor_cb = |at: DVec2| -> Option<f64> {
                 if is_bus {
-                    Some(origin.z)
+                    Some(seat_floor.map_or(origin.z, |f: pax::SeatFloor| f.at(at)))
                 } else {
                     world
                         .walk_height_near(at.x, at.y, origin.z)
@@ -324,6 +339,8 @@ impl Humans {
                 seat: ik_seat,
                 look: ik_look,
                 reach: ik_reach,
+                gesture: ik_gesture,
+                approach: None,
                 grips: None,
                 grip_frames: None,
                 grip_lean: 0.0,

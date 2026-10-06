@@ -101,6 +101,30 @@ impl Humans {
             .filter(|q| (q.position - position).truncate().length() < 30.0)
             .map(|q| (Arc::as_ptr(&q.ty) as usize, q.variant))
             .collect();
+        // OMSI_PAX_FIGURE=<part of a file name>: only those figures (to look at them)
+        if kind.is_none()
+            && let Ok(only) = omsi_cfg::env::var("OMSI_PAX_FIGURE")
+        {
+            let only = only.to_ascii_lowercase();
+            let all: Vec<Arc<HumanType>> = self
+                .types
+                .iter()
+                .chain(self.alternates.values().flatten())
+                .filter(|t| {
+                    t.def
+                        .path
+                        .to_string_lossy()
+                        .to_ascii_lowercase()
+                        .contains(&only)
+                })
+                .cloned()
+                .collect();
+            if !all.is_empty() {
+                let t = all[(self.rand() % all.len() as u64) as usize].clone();
+                let v = (self.rand() % (t.variants.len() + 1) as u64) as usize;
+                return (t, v);
+            }
+        }
         let mut choice: Option<(Arc<HumanType>, usize)> = None;
         for attempt in 0..10 {
             let index = match kind {

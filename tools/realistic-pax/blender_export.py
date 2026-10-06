@@ -6,14 +6,17 @@ import re
 import struct
 import sys
 
+import bmesh
 import bpy
 from mathutils import Matrix, Vector
 
-# triangles of each level at most: the first keeps a Rocketbox figure as it is
+# triangles of each level at most, besides the small parts kept whole: the first keeps a
+# Rocketbox figure as it is
 LODS = [("", 10000), ("_mid", 2700), ("_low", 700)]
 OMSI_BONES = ["OS_L", "OS_R", "US_L", "US_R", "OA_L", "OA_R", "UA_L", "UA_R",
               "Hip", "Main", "Head", "Hand_L", "Hand_R"]
 FINGERS = ("thumb_", "index_", "middle_", "ring_", "pinky_")
+SMALL_PART = 0.04
 
 
 def omsi_bone_of(name):
@@ -108,6 +111,40 @@ def texture_of(mat):
     return None
 
 
+def small_part_vertices(ob):
+    bm = bmesh.new()
+    bm.from_mesh(ob.data)
+    m = ob.matrix_world
+    small, seen = set(), set()
+    for v in bm.verts:
+        if v.index in seen:
+            continue
+        seen.add(v.index)
+        part, todo = [], [v]
+        while todo:
+            x = todo.pop()
+            part.append(x)
+            for e in x.link_edges:
+                o = e.other_vert(x)
+                if o.index not in seen:
+                    seen.add(o.index)
+                    todo.append(o)
+        pts = [m @ p.co for p in part]
+        if max(max(p[i] for p in pts) - min(p[i] for p in pts) for i in range(3)) <= SMALL_PART:
+            small.update(p.index for p in part)
+    count = len(bm.verts)
+    bm.free()
+    return small, count
+
+
+def without_vertices(ob, drop):
+    bm = bmesh.new()
+    bm.from_mesh(ob.data)
+    bmesh.ops.delete(bm, geom=[v for v in bm.verts if drop(v.index)], context="VERTS")
+    bm.to_mesh(ob.data)
+    bm.free()
+
+
 def decimated(ob, ratio):
     c = ob.copy()
     c.data = ob.data.copy()
@@ -119,14 +156,27 @@ def decimated(ob, ratio):
         for mod in [m for m in c.modifiers if m.type == "MASK"]:
             bpy.ops.object.modifier_move_to_index(modifier=mod.name, index=0)
             bpy.ops.object.modifier_apply(modifier=mod.name)
-        if ratio < 1.0:
-            mod = c.modifiers.new("lod", "DECIMATE")
-            mod.ratio = ratio
-            mod.use_collapse_triangulate = True
-            # decimated before the armature bends it, so the weights still belong to the vertices
-            bpy.ops.object.modifier_move_to_index(modifier=mod.name, index=0)
-            bpy.ops.object.modifier_apply(modifier=mod.name)
-    return c
+    if ratio >= 1.0:
+        return [c]
+    small, count = small_part_vertices(c)
+    if len(small) == count:
+        return [c]
+    out = [c]
+    if small:
+        part = c.copy()
+        part.data = c.data.copy()
+        bpy.context.scene.collection.objects.link(part)
+        without_vertices(part, lambda i: i not in small)
+        without_vertices(c, lambda i: i in small)
+        out.append(part)
+    with bpy.context.temp_override(object=c, active_object=c, selected_objects=[c]):
+        mod = c.modifiers.new("lod", "DECIMATE")
+        mod.ratio = ratio
+        mod.use_collapse_triangulate = True
+        # decimated before the armature bends it, so the weights still belong to the vertices
+        bpy.ops.object.modifier_move_to_index(modifier=mod.name, index=0)
+        bpy.ops.object.modifier_apply(modifier=mod.name)
+    return out
 
 
 def bake(arm, meshes, mats, textures):
@@ -257,7 +307,7 @@ def main():
     levels, hand_r = [], []
     for suffix, most in LODS:
         ratio = min(1.0, most / max(full, 1))
-        v, t, w, hands = bake(arm, [decimated(o, ratio) for o in meshes], mats, textures)
+        v, t, w, hands = bake(arm, [d for o in meshes for d in decimated(o, ratio)], mats, textures)
         hand_r = hand_r or hands
         levels.append((f"{prefix}{suffix}.o3d", v, t, w))
 
