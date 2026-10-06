@@ -118,7 +118,12 @@ function Entry({ release: r, index }: { release: Release; index: number }) {
 
 export function Releases() {
   const { data: list, error } = useAsync(
-    () => gh<Release[]>("releases?per_page=30"),
+    () =>
+      gh<Release[]>("releases?per_page=100").then((list) =>
+        [...list].sort(
+          (a, b) => Date.parse(b.published_at) - Date.parse(a.published_at),
+        ),
+      ),
     [],
   );
 

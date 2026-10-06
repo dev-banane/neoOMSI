@@ -96,29 +96,35 @@ export function mountShader(spec: ShaderSpec): Shader {
     antialias: false,
   }) as WebGLRenderingContext | null;
   if (!gl) return fail();
-  const program = link(gl, header(gl, spec.derivatives) + spec.fragment);
-  if (!program) return fail();
-  gl.useProgram(program);
 
-  const buffer = gl.createBuffer();
-  gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
-  gl.bufferData(
-    gl.ARRAY_BUFFER,
-    new Float32Array([-1, -1, 3, -1, -1, 3]),
-    gl.STATIC_DRAW,
-  );
-  const position = gl.getAttribLocation(program, "a_position");
-  gl.enableVertexAttribArray(position);
-  gl.vertexAttribPointer(position, 2, gl.FLOAT, false, 0, 0);
+  let program: WebGLProgram | null = null;
+  let buffer: WebGLBuffer | null = null;
+  const setup = () => {
+    program = link(gl, header(gl, spec.derivatives) + spec.fragment);
+    if (!program) return false;
+    gl.useProgram(program);
+    buffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+    gl.bufferData(
+      gl.ARRAY_BUFFER,
+      new Float32Array([-1, -1, 3, -1, -1, 3]),
+      gl.STATIC_DRAW,
+    );
+    const position = gl.getAttribLocation(program, "a_position");
+    gl.enableVertexAttribArray(position);
+    gl.vertexAttribPointer(position, 2, gl.FLOAT, false, 0, 0);
+    return true;
+  };
+  if (!setup()) return fail();
 
-  const uniform: Uniform = (name) => gl.getUniformLocation(program, name);
-  const resolution = uniform("u_resolution");
+  const uniform: Uniform = (name) =>
+    program && gl.getUniformLocation(program, name);
 
   let size: Size = { width: 0, height: 0, dpr: 1 };
   let seconds = 0;
 
   const draw = () => {
-    if (!size.width || !size.height) return;
+    if (!program || !size.width || !size.height) return;
     spec.frame?.(gl, uniform, seconds);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
   };
@@ -126,7 +132,7 @@ export function mountShader(spec: ShaderSpec): Shader {
   const resize = () => {
     const width = parent.clientWidth;
     const height = parent.clientHeight;
-    if (!width || !height) return;
+    if (!program || !width || !height) return;
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     canvas.width = Math.round(width * dpr);
     canvas.height = Math.round(height * dpr);
@@ -134,7 +140,7 @@ export function mountShader(spec: ShaderSpec): Shader {
     canvas.style.height = `${height}px`;
     size = { width: canvas.width, height: canvas.height, dpr };
     gl.viewport(0, 0, canvas.width, canvas.height);
-    gl.uniform2f(resolution, canvas.width, canvas.height);
+    gl.uniform2f(uniform("u_resolution"), canvas.width, canvas.height);
     spec.resize?.(gl, uniform, size);
     draw();
   };
@@ -162,14 +168,29 @@ export function mountShader(spec: ShaderSpec): Shader {
   });
   intersectionObserver.observe(canvas);
 
+  const lost = (e: Event) => {
+    e.preventDefault();
+    program = null;
+    buffer = null;
+  };
+  const restored = () => {
+    if (setup()) resize();
+  };
+  canvas.addEventListener("webglcontextlost", lost);
+  canvas.addEventListener("webglcontextrestored", restored);
+
   return {
     draw,
     destroy() {
       resizeObserver.disconnect();
       intersectionObserver.disconnect();
       cancelAnimationFrame(raf);
+      canvas.removeEventListener("webglcontextlost", lost);
+      canvas.removeEventListener("webglcontextrestored", restored);
       gl.deleteBuffer(buffer);
       gl.deleteProgram(program);
+      program = null;
+      buffer = null;
     },
   };
 }
