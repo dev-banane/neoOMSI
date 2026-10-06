@@ -3,8 +3,8 @@ import { DISCORD, PLATFORMS, REPO, SERVERS, type Build } from "../content/data";
 import {
   ago,
   date,
-  gh,
   megabytes,
+  releases,
   version,
   type Asset,
   type Release,
@@ -80,9 +80,17 @@ function Files({ assets }: { assets: Asset[] }) {
   );
 }
 
-function Entry({ release: r, index }: { release: Release; index: number }) {
+function Entry({
+  release: r,
+  index,
+  latest,
+}: {
+  release: Release;
+  index: number;
+  latest: boolean;
+}) {
   return (
-    <li className={index === 0 ? "latest" : ""}>
+    <li className={latest ? "latest" : ""}>
       <p className="when">
         {date(r.published_at)}
         <span>{ago(r.published_at)}</span>
@@ -93,7 +101,7 @@ function Entry({ release: r, index }: { release: Release; index: number }) {
             <span className="text-[1.6rem] leading-tight font-semibold text-heading">
               {version(r)}
             </span>
-            {index === 0 && !r.prerelease && <Tag color="#2da44e">Latest</Tag>}
+            {latest && <Tag color="#2da44e">Latest</Tag>}
             {r.prerelease && <Tag color="#d8a020">Pre-release</Tag>}
             <span className="text-muted">
               {r.name && r.name !== r.tag_name ? r.name : ""}
@@ -119,21 +127,22 @@ function Entry({ release: r, index }: { release: Release; index: number }) {
 export function Releases() {
   const { data: list, error } = useAsync(
     () =>
-      gh<Release[]>("releases?per_page=100").then((list) =>
-        [...list].sort(
+      releases().then((list) =>
+        list.sort(
           (a, b) => Date.parse(b.published_at) - Date.parse(a.published_at),
         ),
       ),
     [],
   );
+  const latest = list?.find((r) => !r.prerelease);
 
   return (
     <>
       <PageHead>
         <h1 className="display">Releases</h1>
         <p className="mt-6 max-w-[34em] text-[19px] text-muted">
-          Every version and what changed, newest first. The newest one is also
-          on the{" "}
+          Every version and what changed, newest first. The latest stable one is
+          also on the{" "}
           <a className="link" href={url("/download/")}>
             download page
           </a>
@@ -148,7 +157,12 @@ export function Releases() {
         ) : list.length ? (
           <ol className="timeline">
             {list.map((r, i) => (
-              <Entry key={r.tag_name} release={r} index={i} />
+              <Entry
+                key={r.tag_name}
+                release={r}
+                index={i}
+                latest={r === latest}
+              />
             ))}
           </ol>
         ) : (

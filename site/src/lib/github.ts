@@ -60,6 +60,15 @@ export async function gh<T>(path: string): Promise<T> {
   return data;
 }
 
+export async function releases() {
+  const all: Release[] = [];
+  for (let page = 1; ; page++) {
+    const batch = await gh<Release[]>(`releases?per_page=100&page=${page}`);
+    all.push(...batch);
+    if (batch.length < 100) return all;
+  }
+}
+
 let latest: { at: number; release: Release | null } | null = null;
 export async function latestRelease(): Promise<Release | null> {
   // A release comes with every push, so a fetch from a few minutes ago may already be stale.
