@@ -1946,6 +1946,22 @@ fn an_unknown_terminus_keeps_service_distinct_from_explicit_all_exit() {
 }
 
 #[test]
+fn a_seat_being_vacated_still_counts_for_the_scripts() {
+    let f = Fixture::new();
+    let mut h = Humans::new(&f.root);
+    h.buses.player_cabin = Some(cabin());
+    let mut p = Pax::new(1.1);
+    p.task = Task::InBusToExit;
+    p.bus = Some(BusId::Player);
+    p.inside = Some(BusId::Player);
+    p.vacating = Some(1);
+    h.people.push(f.person(7, State::Pax(Box::new(p)), false));
+    assert_eq!(h.seat_counts()[2], 1, "still getting up");
+    h.pax_mut(0).unwrap().vacating = None;
+    assert_eq!(h.seat_counts()[2], 0);
+}
+
+#[test]
 fn opening_another_exit_preserves_the_current_path_progress() {
     let f = Fixture::new();
     let mut h = Humans::new(&f.root);

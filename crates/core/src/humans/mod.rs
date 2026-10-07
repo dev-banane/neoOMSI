@@ -1362,9 +1362,10 @@ impl Humans {
             return Vec::new();
         };
         let sitting = self.people.iter().filter_map(|p| match &p.state {
-            State::Pax(x) if x.inside == Some(BusId::Player) && x.task == Task::SittingInBus => {
-                x.seat
-            }
+            State::Pax(x) if x.inside == Some(BusId::Player) => x
+                .seat
+                .filter(|_| x.task == Task::SittingInBus)
+                .or(x.vacating),
             _ => None,
         });
         seat_numbers(&cabin.seats, sitting)
