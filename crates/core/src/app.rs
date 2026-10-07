@@ -793,6 +793,7 @@ impl App {
                     h.exact_fare = ::config::get_bool("gameplay", "exact_fare").unwrap_or(true);
                     h.boarding = ::config::get_string("gameplay", "boarding").unwrap_or_else(|| "auto".into());
                     h.prefer_seats = ::config::get_bool("gameplay", "pax_prefer_seats").unwrap_or(false);
+                    h.rear_entry = ::config::get_bool("gameplay", "pax_rear_entry").unwrap_or(true);
                     h.voices = match ::config::get_string("passengers", "voices").unwrap_or_else(|| "all".into()).as_str() {
                         "off" => 2,
                         "tickets" => 1,

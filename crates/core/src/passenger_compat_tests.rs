@@ -1871,7 +1871,7 @@ fn complete_journey(fare: TicketAction) {
     tick(&mut h, &b, &regs);
     assert!(h.stop_request);
     assert_eq!(h.pax(0).unwrap().task, Task::InBusToExit);
-    assert!(!h.buses.seats[&b.id][reserved]);
+    assert_eq!(h.buses.seats[&b.id][reserved], b.cabin.seats[reserved].seated);
     regs.get_mut(&b.id).unwrap().at = Some(2);
     for _ in 0..600 {
         tick(&mut h, &b, &regs);
@@ -1879,6 +1879,7 @@ fn complete_journey(fare: TicketAction) {
             break;
         }
     }
+    assert!(!h.buses.seats[&b.id][reserved]);
     assert!(matches!(h.people[0].state, State::Strolling(_)));
     assert_eq!(h.people[0].place, Place::Ground);
     assert_eq!(h.people[0].id, 42);
@@ -2848,4 +2849,65 @@ fn the_driver_getting_up_sits_at_the_wheel_first_and_then_stands_up() {
         h.animate_avatar(0, 1.0 / 30.0, &f.world, std::slice::from_ref(&b), &ix);
     }
     assert!(h.people[0].pose.sit_amount() < 0.05, "stood up");
+}
+
+#[test]
+fn the_validator_is_used_where_the_way_in_passes_it() {
+    let f = Fixture::new();
+    let mut h = Humans::new(&f.root);
+    let mut c = cabin();
+    Arc::get_mut(&mut c).unwrap().stamper = Some((Some(3), Vec3::new(0.35, 1.0, 1.2)));
+    let b = bus(c);
+    let ix: HashMap<BusId, usize> = [(b.id, 0)].into_iter().collect();
+    let mut p = Pax::new(1.1);
+    p.task = Task::InBusToPlace;
+    p.inside = Some(b.id);
+    p.bus = Some(b.id);
+    p.seat = Some(1);
+    p.ticket = TicketAction::Stamp;
+    p.movement = Movement::AlongPath;
+    p.pos = DVec3::Y;
+    p.pt = Some(2);
+    p.pt_target = Some(3);
+    h.people.push(f.person(42, State::Pax(Box::new(p)), false));
+    h.task_to_place(
+        0,
+        std::slice::from_ref(&b),
+        &ix,
+        &f.world,
+        None,
+        &mut |_, _, _, _| {},
+        &mut false,
+    );
+    let p = h.pax(0).unwrap();
+    assert_eq!(p.fare_phase, FarePhase::Validating);
+    assert_ne!(p.movement, Movement::AlongPath);
+    assert!(p.target.y < 1.5, "stamps at {:?}", p.target);
+}
+
+#[test]
+fn without_rear_entry_everybody_boards_at_the_entries() {
+    let f = Fixture::new();
+    for rear in [true, false] {
+        let mut h = Humans::new(&f.root);
+        h.set_natural(true);
+        h.rear_entry = rear;
+        let mut b = bus(cabin());
+        b.entry_open = vec![true];
+        b.exit_open = vec![true, true];
+        let ix: HashMap<BusId, usize> = [(b.id, 0)].into_iter().collect();
+        let mut p = Pax::new(1.1);
+        p.task = Task::ToBus;
+        p.bus = Some(b.id);
+        p.seat = Some(1);
+        p.pos = DVec3::new(1.8, 3.0, 0.0);
+        h.people.push(f.person(42, State::Pax(Box::new(p)), false));
+        h.choose_entry(0, std::slice::from_ref(&b), &ix);
+        let door = h.pax(0).unwrap().door.unwrap();
+        if rear {
+            assert!(door >= b.cabin.entries.len(), "door {door}");
+        } else {
+            assert!(door < b.cabin.entries.len(), "door {door}");
+        }
+    }
 }

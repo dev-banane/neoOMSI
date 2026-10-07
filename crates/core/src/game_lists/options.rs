@@ -450,6 +450,7 @@ pub(super) fn toggle_now(app: &App, id: &str) -> Option<bool> {
         "nav_arrows" => app.navigator.as_ref().map_or(::config::get_bool("navigator", "arrows").unwrap_or(false), |n| n.arrows),
         "exact_fare" => ::config::get_bool("gameplay", "exact_fare").unwrap_or(true),
         "pax_prefer_seats" => ::config::get_bool("gameplay", "pax_prefer_seats").unwrap_or(false),
+        "pax_rear_entry" => ::config::get_bool("gameplay", "pax_rear_entry").unwrap_or(true),
         "pax_ik" => app.args.pax_ik.unwrap_or(::config::get_bool("passengers", "ik").unwrap_or(true)),
         "collision_pedestrians" => ::config::get_bool("gameplay", "collision_pedestrians").unwrap_or(true),
         "ssao" => ::config::get_bool("graphics", "ssao").unwrap_or(true),
@@ -721,6 +722,11 @@ pub(super) fn toggle_set(app: &mut App, id: &str, on: bool) -> Option<(&'static 
         }
         "pax_prefer_seats" => {
             ::config::set_setting("gameplay", "pax_prefer_seats", on);
+            let _ = ::config::save();
+            None
+        }
+        "pax_rear_entry" => {
+            ::config::set_setting("gameplay", "pax_rear_entry", on);
             let _ = ::config::save();
             None
         }

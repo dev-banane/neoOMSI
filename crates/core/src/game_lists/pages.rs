@@ -158,6 +158,12 @@ pub(super) fn options_pages(app: &App) -> Vec<Page> {
             "Passengers prefer available seats",
             "Passengers take a free seat when boarding; standing places are used when all seats are taken",
         ),
+        switch_row(
+            app,
+            "pax_rear_entry",
+            "Boarding at the rear doors",
+            "Passengers who need no ticket from the driver also get on at the rear doors",
+        ),
         pick("maintenance", "Maintenance", later),
         switch_row(
             app,

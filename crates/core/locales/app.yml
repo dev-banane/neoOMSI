@@ -478,6 +478,10 @@ _version: 2
   de: "Fahrgäste bevorzugen freie Sitzplätze"
 "Passengers take a free seat when boarding; standing places are used when all seats are taken":
   de: "Fahrgäste wählen beim Einsteigen einen freien Sitzplatz; Stehplätze werden genutzt, wenn alle Sitze belegt sind"
+"Boarding at the rear doors":
+  de: "Einstieg an den hinteren Türen"
+"Passengers who need no ticket from the driver also get on at the rear doors":
+  de: "Fahrgäste, die keinen Fahrschein beim Fahrer kaufen, steigen auch hinten ein"
 "Passenger voices":
   de: "Fahrgaststimmen"
 "Greetings and tickets":

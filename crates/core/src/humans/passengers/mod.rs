@@ -193,6 +193,9 @@ impl Humans {
             if let Some(seat) = self.pax_mut(i).unwrap().seat.take() {
                 self.free_seat(bus, seat);
             }
+            if let Some(seat) = self.pax_mut(i).unwrap().vacating.take() {
+                self.free_seat(bus, seat);
+            }
             self.pax_mut(i).unwrap().bus = None;
         }
         // inside a bus that is gone (a timetable bus left the map): gone with it

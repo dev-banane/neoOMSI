@@ -257,6 +257,7 @@ pub struct Humans {
     /// Prefer free seated places when reserving a place; off preserves OMSI's random
     /// choice among seated and standing places.
     pub prefer_seats: bool,
+    pub rear_entry: bool,
     /// The driver pressed the ticket key (`ticket_give`): sell the requested ticket.
     pub give_ticket: bool,
     /// The driver pressed `change_give`: all the change owed goes on the tray at once.
@@ -464,6 +465,7 @@ impl Humans {
             exact_fare: true,
             boarding: "auto".into(),
             prefer_seats: false,
+            rear_entry: true,
             give_ticket: false,
             give_change_all: false,
             ticket_key: "T".into(),
@@ -478,7 +480,7 @@ impl Humans {
             trace: ::legacy_config::env::var("OMSI_TRACE_PAX").ok().and_then(|f| std::fs::File::create(f).ok()).map(|f| {
                 use std::io::Write;
                 let mut w = std::io::BufWriter::new(f);
-                let _ = writeln!(w, "t,id,state,ground,posed,x,y,z,heading,lx,ly,lz,rx,ry,rz,vx,vy,task,movement,stop,door,point,target,why");
+                let _ = writeln!(w, "t,id,state,ground,posed,x,y,z,heading,lx,ly,lz,rx,ry,rz,vx,vy,task,movement,stop,door,point,target,why,bx,by");
                 w
             }),
             tiles_seen: 0,
@@ -1193,12 +1195,15 @@ impl Humans {
         let State::Pax(x) = &mut self.people[i].state else {
             return;
         };
-        let (stop, spot, bus, seat) = (x.stop, x.spot.take(), x.bus.or(x.inside), x.seat.take());
+        let (stop, spot, bus) = (x.stop, x.spot.take(), x.bus.or(x.inside));
+        let seats = [x.seat.take(), x.vacating.take()];
         if let (Some(s), Some(k)) = (stop, spot) {
             self.free_spot(s, k);
         }
-        if let (Some(b), Some(k)) = (bus, seat) {
-            self.free_seat(b, k);
+        for k in seats.into_iter().flatten() {
+            if let Some(b) = bus {
+                self.free_seat(b, k);
+            }
         }
     }
 

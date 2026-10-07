@@ -2052,6 +2052,14 @@ fn gameplay_tab(
         "Passengers prefer available seats",
         "pax_prefer_seats",
     );
+    toggle_setting(
+        ui,
+        s,
+        dirty,
+        c.row(),
+        "Boarding at the rear doors",
+        "pax_rear_entry",
+    );
     sel_setting(
         ui,
         s,
@@ -5563,6 +5571,7 @@ mod settings_tests {
             "s-board",
             "set-exact_fare",
             "set-pax_prefer_seats",
+            "set-pax_rear_entry",
             "s-paxmodels",
             "s-paxpack",
             "s-paxmotion",
