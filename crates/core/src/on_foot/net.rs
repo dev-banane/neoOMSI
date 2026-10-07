@@ -83,7 +83,7 @@ impl App {
                 .map(|rel| ::legacy_config::resolve_path(&self.args.root, &rel))
                 .filter(|p| ::legacy_config::vfs::exists(p))
                 .and_then(|p| crate::driver::cached_type(&p))
-                .map(|t| h.type_index(t) as u64)
+                .map(|t| h.avatar_figure(t))
                 .unwrap_or(id as u64 * 13 + 5);
             let aboard = wk.aboard.and_then(|a| {
                 let bus = if a.owner == my_id {

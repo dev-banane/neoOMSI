@@ -346,6 +346,7 @@ pub struct DriverFigure {
     rests: Option<bool>,
     thighs: Option<[(Vec3, Vec3); 2]>,
     pub cue: Cue,
+    ticket_door: Option<Vec3>,
     trace: Option<(std::io::BufWriter<std::fs::File>, f32)>,
 }
 
@@ -602,7 +603,8 @@ impl DriverFigure {
             rests: None,
             thighs: None,
             cue: Cue::default(),
-            trace: None,
+            ticket_door: None,
+            trace: open_trace(),
         };
         f.seat_in(v, seat);
         Some(f)
@@ -647,6 +649,9 @@ impl DriverFigure {
             (hip.x.to_bits() as u64) << 20 ^ v.position.x.to_bits() ^ 0x9e37_79b9,
         ));
         self.look_at = None;
+        self.ticket_door = cabin_of(&v.ty.def)
+            .and_then(|c| c.ticket_sales.first().map(|t| Vec3::from(t.pos)))
+            .map(|p| p + Vec3::new(0.4, 0.2, 0.2));
         self.motion = Motion::default();
         self.errand_hand = if hip.x < 0.0 { 1 } else { 0 };
         self.errand = None;
@@ -1678,11 +1683,7 @@ impl DriverFigure {
         } else {
             5.5
         };
-        let door = self.cue.door.or_else(|| {
-            cabin_of(&v.ty.def)
-                .and_then(|c| c.ticket_sales.first().map(|t| Vec3::from(t.pos)))
-                .map(|p| p + Vec3::new(0.4, 0.2, 0.2))
-        });
+        let door = self.cue.door.or(self.ticket_door);
         let scene = gaze::Scene {
             speed,
             steer,
@@ -1957,8 +1958,26 @@ fn turn_towards(a: Vec3, b: Vec3, max: f32) -> Vec3 {
     glam::Quat::from_axis_angle(axis, max) * a
 }
 
+/// `OMSI_TRACE_DRIVER=<csv>`: the first driver's skeleton, every frame.
+fn open_trace() -> Option<(std::io::BufWriter<std::fs::File>, f32)> {
+    use std::io::Write;
+    static TAKEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let path = ::legacy_config::env::var("OMSI_TRACE_DRIVER").ok()?;
+    if TAKEN.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return None;
+    }
+    let mut w = std::io::BufWriter::new(std::fs::File::create(path).ok()?);
+    let mut head = String::from(
+        "t,clock,speed,theta,wx,wy,wz,ax,ay,az,radius,kx,ky,kz,lever,vx,vy,vz,heading,qx,qy,qz,qw,lx,ly,lz,errand,customer,desk,doors,foot_x,foot_y,foot_z,accx,accy,stood,rests",
+    );
+    for n in ::simulation::human::SKELETON {
+        head += &format!(",{n}_x,{n}_y,{n}_z");
+    }
+    let _ = writeln!(w, "{head}");
+    Some((w, 0.0))
+}
+
 impl DriverFigure {
-    /// `OMSI_TRACE_DRIVER=<csv>`: the first driver's skeleton, every frame.
     fn write_trace(
         &mut self,
         v: &VehicleInstance,
@@ -1968,26 +1987,8 @@ impl DriverFigure {
         dt: f32,
     ) {
         use std::io::Write;
-        static TAKEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
         if self.trace.is_none() {
-            let Ok(path) = ::legacy_config::env::var("OMSI_TRACE_DRIVER") else {
-                return;
-            };
-            if TAKEN.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                return;
-            }
-            let Ok(f) = std::fs::File::create(path) else {
-                return;
-            };
-            let mut w = std::io::BufWriter::new(f);
-            let mut head = String::from(
-                "t,clock,speed,theta,wx,wy,wz,ax,ay,az,radius,kx,ky,kz,lever,vx,vy,vz,heading,qx,qy,qz,qw,lx,ly,lz,errand,customer,desk,doors,foot_x,foot_y,foot_z,accx,accy,stood,rests",
-            );
-            for n in ::simulation::human::SKELETON {
-                head += &format!(",{n}_x,{n}_y,{n}_z");
-            }
-            let _ = writeln!(w, "{head}");
-            self.trace = Some((w, 0.0));
+            return;
         }
         let body = v.body_rotation();
         let world = |p: Vec3| at + xf.transform_vector3(p).as_dvec3();
