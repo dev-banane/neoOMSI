@@ -3,6 +3,7 @@ mod camera;
 mod collision;
 mod net;
 mod vehicle;
+pub(crate) mod wheel;
 
 use crate::App;
 use crate::humans::BusId;
@@ -66,6 +67,8 @@ pub(crate) struct OnFoot {
     pub on_lane: bool,
     pub door_grace: f32,
     pub attached: bool,
+    pub wheel: Option<(BusId, glam::Vec3, f32, f32)>,
+    pub cab: Option<wheel::CabMove>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -139,6 +142,8 @@ impl OnFoot {
             on_lane: false,
             door_grace: 0.0,
             attached: false,
+            wheel: None,
+            cab: None,
         }
     }
 
@@ -314,7 +319,11 @@ impl App {
         f.on_lane = false;
         self.foot_turn_keys(&mut f, dt);
         self.foot_validate(&mut f);
+        let at_wheel = f.cab.is_some();
         if !self.paused {
+            self.foot_cab(&mut f, dt);
+        }
+        if !self.paused && !at_wheel {
             match f.mode() {
                 Mode::Transit => Self::foot_transit(&mut f, dt),
                 Mode::Walking | Mode::Aboard => self.foot_walk(&mut f, dt as f64),
@@ -409,6 +418,24 @@ impl App {
     fn foot_arrive(&mut self) -> bool {
         match self.on_foot.as_mut().and_then(|f| f.arrive.take()) {
             Some(Then::Wheel) if self.player.is_some() => {
+                let seat = self
+                    .player
+                    .as_ref()
+                    .and_then(|p| p.driver.as_ref())
+                    .map(|d| d.seat_point());
+                let stand = self.player.as_ref().and_then(|p| {
+                    self.humans
+                        .as_mut()
+                        .and_then(|h| h.driver_stand(&p.vehicle))
+                });
+                let sitting = self.on_foot.as_ref().is_some_and(|f| f.cab.is_some());
+                if let (Some(f), Some(seat), Some(stand), false) =
+                    (self.on_foot.as_mut(), seat, stand, sitting)
+                {
+                    f.cab = Some(wheel::CabMove::new(BusId::Player, seat, stand, true));
+                    f.vel = glam::DVec2::ZERO;
+                    return false;
+                }
                 self.sit_at_the_wheel();
                 self.service_msg = Some(("Back at the wheel".into(), 2.0));
                 true
@@ -421,6 +448,45 @@ impl App {
                 None => false,
             },
             _ => false,
+        }
+    }
+
+    fn foot_cab(&mut self, f: &mut OnFoot, dt: f32) {
+        let Some(mut cab) = f.cab else {
+            return;
+        };
+        let s = cab.step(dt);
+        let bus_heading = self
+            .player
+            .as_ref()
+            .map(|p| p.vehicle.heading)
+            .unwrap_or(0.0);
+        f.wheel = s.wheel;
+        f.inside = Some((BusId::Player, s.at));
+        f.seat = None;
+        f.heading = wrap(bus_heading + s.heading as f64);
+        let h = bus_heading.to_radians();
+        let v = s.vel.as_dvec2();
+        f.vel = DVec2::new(
+            v.x * h.cos() + v.y * h.sin(),
+            -v.x * h.sin() + v.y * h.cos(),
+        );
+        if let Some(w) = self
+            .humans
+            .as_mut()
+            .zip(self.player.as_ref())
+            .and_then(|(hm, p)| hm.vehicle_cabin_world(&p.vehicle, s.at))
+        {
+            f.pos = w;
+        }
+        f.cab = Some(cab);
+        if s.done {
+            if cab.sitting_down {
+                f.arrive = Some(Then::Wheel);
+            } else {
+                f.cab = None;
+                f.vel = DVec2::ZERO;
+            }
         }
     }
 

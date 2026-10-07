@@ -37,7 +37,11 @@ pub struct AvatarCmd {
     /// in the bus's frame as it is this frame, as its passengers are (a world point taken
     /// a frame earlier left the figure trembling behind the moving bus).
     pub aboard: Option<(BusId, Vec3)>,
+    /// The bus, the hip (bus frame), heading, seat height.
+    pub wheel: Option<(BusId, Vec3, f32, f32)>,
 }
+
+const EXACT_FIGURE: u64 = 1 << 62;
 
 /// A seat an avatar may take: which, in which bus.
 #[derive(Debug, Clone, Copy)]
@@ -65,10 +69,15 @@ impl Humans {
             .filter(|id| self.people.iter().any(|p| p.id == *id));
         if known.is_none() {
             self.use_map_humans(world);
-            let Some(&type_index) = self
-                .population
-                .get((kind % self.population.len().max(1) as u64) as usize)
-            else {
+            let exact = (kind & EXACT_FIGURE != 0)
+                .then(|| (kind & !EXACT_FIGURE) as usize)
+                .filter(|&k| k < self.types.len());
+            self.next_variant = exact.map(|_| 0);
+            let Some(type_index) = exact.or_else(|| {
+                self.population
+                    .get((kind % self.population.len().max(1) as u64) as usize)
+                    .copied()
+            }) else {
                 return;
             };
             let state = State::Idle;
@@ -87,6 +96,9 @@ impl Humans {
                 mode: PuppetMode::Avatar,
             });
             self.avatars.avatars.insert(key, self.people[i].id);
+            if cmd.wheel.is_some() {
+                self.avatars.settle.insert(self.people[i].id);
+            }
         }
         // a seat taken is kept from the passengers; one left is theirs again
         let before = self.avatars.avatar_cmds.get(&key).and_then(|c| c.seat);
@@ -101,6 +113,11 @@ impl Humans {
             }
         }
         self.avatars.avatar_cmds.insert(key, cmd);
+    }
+
+    /// An avatar of `ty` itself rather than one of the population.
+    pub fn avatar_figure(&mut self, ty: Arc<HumanType>) -> u64 {
+        self.type_index(ty) as u64 | EXACT_FIGURE
     }
 
     /// Take avatar `key` away.
@@ -581,18 +598,42 @@ impl Humans {
             return;
         };
         let dt_ms = dt * 1000.0;
-        let seated = cmd.seat.and_then(|(b, k)| {
-            let bn = bus_ix.get(&b).map(|x| &buses[*x])?;
-            let s = bn.cabin.seats.get(k)?.clone();
-            Some((b, s, bn))
-        });
+        let seated = cmd
+            .seat
+            .and_then(|(b, k)| {
+                let bn = bus_ix.get(&b).map(|x| &buses[*x])?;
+                let s = bn.cabin.seats.get(k)?.clone();
+                Some((b, s, bn))
+            })
+            .or_else(|| {
+                let (b, hip, rot, height) = cmd.wheel?;
+                let bn = bus_ix.get(&b).map(|x| &buses[*x])?;
+                let r = rot.to_radians();
+                let s = Seat {
+                    point: None,
+                    pos: hip,
+                    floor: Vec3::new(
+                        hip.x + r.sin() * SEAT_FRONT,
+                        hip.y + r.cos() * SEAT_FRONT,
+                        hip.z - height,
+                    ),
+                    rot,
+                    seated: true,
+                    height,
+                    omsi_seat: 0,
+                };
+                Some((b, s, bn))
+            });
         let seatheight = self.people[i].ty.def.seat_height;
         let p = &mut self.people[i];
         let mut input = match seated.as_ref() {
             Some((b, s, bn)) => {
                 // on the seat, in its bus's frame (set_task(7): the feet the human's seat
                 // height under the seat point, facing the way the seat does)
-                let l = if s.seated {
+                // (the feet where the driver stands up, or the seat moves with them)
+                let l = if cmd.seat.is_none() && cmd.wheel.is_some() {
+                    s.floor
+                } else if s.seated {
                     s.pos - Vec3::Z * seatheight
                 } else {
                     s.pos
@@ -699,6 +740,11 @@ impl Humans {
             floor: Some(&floor_cb),
             ..Default::default()
         };
+        let settle = self.avatars.settle.remove(&id);
+        let p = &mut self.people[i];
+        for _ in 0..if settle { 90 } else { 0 } {
+            p.pose.advance(&p.ty.rig, &pose_in, 1.0 / 30.0);
+        }
         p.pose.advance(&p.ty.rig, &pose_in, dt);
         p.finish_animation(self.ik, &input);
     }
@@ -716,4 +762,5 @@ pub(in crate::humans) struct Avatars {
     pub(in crate::humans) avatar_cmds: HashMap<u32, AvatarCmd>,
     /// Avatars not drawn (the first-person view), by person id.
     pub(in crate::humans) avatar_hidden: HashMap<u32, bool>,
+    pub(in crate::humans) settle: HashSet<u32>,
 }

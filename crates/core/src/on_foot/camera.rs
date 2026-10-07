@@ -25,6 +25,7 @@ impl App {
                 .or(f.transit.map(|_| f.pos.z))
                 .or(f.on_lane.then_some(f.pos.z)),
             aboard: f.inside,
+            wheel: f.wheel,
         };
         h.avatar(AVATAR_KEY, w, r, scene, cmd, f.kind);
         h.avatar_show(AVATAR_KEY, show);

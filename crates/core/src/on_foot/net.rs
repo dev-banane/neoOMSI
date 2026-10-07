@@ -103,6 +103,7 @@ impl App {
                     seat: Some((bus, k as usize)),
                     floor: Some(at.z),
                     aboard: None,
+                    wheel: None,
                 },
                 Some((bus, None, at, _)) => AvatarCmd {
                     pos: at,
@@ -112,6 +113,7 @@ impl App {
                     seat: None,
                     floor: Some(at.z),
                     aboard: wk.aboard.map(|a| (bus, glam::Vec3::from(a.local))),
+                    wheel: None,
                 },
                 None if wk.seated => continue,
                 None => AvatarCmd {
@@ -125,6 +127,7 @@ impl App {
                         .filter(|g| wk.z > g + 0.25)
                         .map(|_| wk.z),
                     aboard: None,
+                    wheel: None,
                 },
             };
             h.avatar(REMOTE_KEY + id, w, r, scene, cmd, kind);

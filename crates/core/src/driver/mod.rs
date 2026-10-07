@@ -38,17 +38,20 @@
 //! the gear lever the lone hand pushes the wheel round as far as it can and then takes it again
 //! further back (palming it), rather than letting the rim slide through it.
 
-use glam::{Mat4, Vec3};
+mod gaze;
+mod pedals;
+
 use ::render::{AlphaMode, MeshId, Renderer, Scene};
 use ::simulation::VehicleInstance;
 use ::simulation::human::{
     Activity, HumanType, Pose, PoseInput, curl_hands, grip_centres, hand_slot, skin_from,
 };
+use glam::{DVec3, Mat4, Vec2, Vec3};
 use std::sync::Arc;
 
 /// Where the hands rest on the rim, from the top, clockwise seen by the driver (degrees):
 /// a little above the sides, ten to two as bus drivers hold a flat wheel.
-const REST: [f32; 2] = [-70.0, 70.0];
+const REST: [f32; 2] = [-95.0, 95.0];
 /// Where each hand can hold the rim (degrees from the top): the hands turn with the wheel
 /// within it; a hand turned out of it lets go and takes the rim again further back (the
 /// other hand holding on meanwhile), as a driver shuffles the wheel through his hands. (The
@@ -136,6 +139,28 @@ const LEVER_REACH: f32 = 1.1;
 /// its own) and the clutch pedal (the hand starts for the lever as the pedal goes down).
 const GEAR_VARS: &[&str] = &["Gear", "Gearbox_Gear", "Gear_Selected", "Gang", "Antrieb"];
 const CLUTCH_VARS: &[&str] = &["Clutch", "Clutch_Pedal", "Kupplung"];
+
+#[derive(Default, Clone, Copy, Debug)]
+pub struct Cue {
+    pub customer: Option<Vec3>,
+    pub desk: Option<Vec3>,
+    pub door: Option<Vec3>,
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Errand {
+    Lap,
+    Desk(Vec3),
+}
+
+#[derive(Default)]
+struct Motion {
+    last: Option<(DVec3, DVec3)>,
+    acc: Vec3,
+    speed: f32,
+    pending: f32,
+    stood: f32,
+}
 
 /// The gear lever of a manual bus, as found in its model (`find_shifter`).
 struct Shifter {
@@ -306,6 +331,22 @@ pub struct DriverFigure {
     /// working it is doing.
     shifter: Option<Shifter>,
     shift: ShiftState,
+    pedals: Option<pedals::Pedals>,
+    feet: [Option<Vec3>; 2],
+    gaze: Option<gaze::Gaze>,
+    look_at: Option<Vec3>,
+    motion: Motion,
+    errand_hand: usize,
+    errand: Option<Errand>,
+    errand_w: f32,
+    errand_shown: Option<Errand>,
+    errand_from: Option<(Vec3, Vec3, Vec3)>,
+    errand_t: f32,
+    errand_now: Option<(Vec3, Vec3, Vec3)>,
+    rests: Option<bool>,
+    thighs: Option<[(Vec3, Vec3); 2]>,
+    pub cue: Cue,
+    trace: Option<(std::io::BufWriter<std::fs::File>, f32)>,
 }
 
 /// The upper-arm and forearm bone slots of each side (0 left, 1 right) in `Posed::bones`,
@@ -546,6 +587,22 @@ impl DriverFigure {
             blend: Default::default(),
             shifter: None,
             shift: ShiftState::default(),
+            pedals: None,
+            feet: [None; 2],
+            gaze: None,
+            look_at: None,
+            motion: Motion::default(),
+            errand_hand: 1,
+            errand: None,
+            errand_w: 0.0,
+            errand_shown: None,
+            errand_from: None,
+            errand_t: 1.0,
+            errand_now: None,
+            rests: None,
+            thighs: None,
+            cue: Cue::default(),
+            trace: None,
         };
         f.seat_in(v, seat);
         Some(f)
@@ -575,7 +632,26 @@ impl DriverFigure {
         self.heading = seat.rot;
         self.lamps = seat.illumination;
         self.wheel = find_wheel(v, hip);
-        self.shifter = find_shifter(v, hip, seat.rot);
+        self.shifter = find_shifter(v, hip, seat.rot, self.wheel.as_ref());
+        self.pedals = pedals::Pedals::find(v, hip, seat.rot);
+        self.feet = [None; 2];
+        let mirrors =
+            v.ty.def
+                .cameras_reflexion
+                .iter()
+                .map(|c| Vec3::from(c.pos))
+                .collect();
+        self.gaze = Some(gaze::Gaze::new(
+            mirrors,
+            hip + Vec3::Z * 0.65,
+            (hip.x.to_bits() as u64) << 20 ^ v.position.x.to_bits() ^ 0x9e37_79b9,
+        ));
+        self.look_at = None;
+        self.motion = Motion::default();
+        self.errand_hand = if hip.x < 0.0 { 1 } else { 0 };
+        self.errand = None;
+        self.errand_w = 0.0;
+        self.thighs = None;
         self.shift = ShiftState::default();
         let r = self
             .wheel
@@ -675,9 +751,14 @@ impl DriverFigure {
         }
         if self.settled {
             self.update_shift(v, dt);
+            self.track(v, dt);
+            self.update_errand(v, dt);
         }
         if let Some(theta) = self.wheel_angle(v) {
             self.steer_hands(theta, if self.settled { dt } else { 0.0 });
+        }
+        if self.settled {
+            self.attend(v, dt);
         }
         // the person's own frame: feet at `floor` (slid forward by `slide`), facing `heading`
         let h = self.heading.to_radians();
@@ -794,6 +875,12 @@ impl DriverFigure {
         let posed = self.pose.bones(&self.ty.rig);
         if posed.ok {
             self.keep_elbows(&posed.elbow);
+            self.thighs = Some([0, 1].map(|k| {
+                (
+                    self.from_person(posed.hip[k]),
+                    self.from_person(posed.knee[k]),
+                )
+            }));
         }
         if ::legacy_config::env::var_os("OMSI_DEBUG_DRIVER").is_some() {
             log::info!(
@@ -808,7 +895,7 @@ impl DriverFigure {
             // (drawn this frame as posed; the next frame holds the rim) - a hand on its way
             // to a new hold keeps the correction it had
             let tubes = t.tubes.map(|q| self.to_person(q));
-            let holding = [0, 1].map(|k| self.hands[k].mv.is_none());
+            let holding = [0, 1].map(|k| self.hands[k].mv.is_none() && self.off_wheel(k) == 0.0);
             let off =
                 self.correct_grips(&posed.bones, tubes, 1.0 - (-dt / FIX_EASE).exp(), holding);
             if ::legacy_config::env::var_os("OMSI_DEBUG_DRIVER").is_some() {
@@ -861,7 +948,12 @@ impl DriverFigure {
         }
         self.skins
             .resize_with(self.ty.meshes.len(), Default::default);
-        let open = [0, 1].map(|k| self.hands[k].open().max(self.shift_open(k)));
+        let open = [0, 1].map(|k| {
+            self.hands[k]
+                .open()
+                .max(self.shift_open(k))
+                .max(0.7 * self.off_wheel(k))
+        });
         for (k, m) in self.ty.meshes.iter().enumerate() {
             let (pos, nrm) = &mut self.skins[k];
             if open.iter().any(|&o| o > 0.01) {
@@ -956,6 +1048,7 @@ impl DriverFigure {
         let (first, count) = render
             .seat_lamps(v.ty.model.interior_lights.len(), &self.lamps)
             .unwrap_or((0, 0));
+        self.write_trace(v, &posed, at, xf, dt);
         for (_, inst) in &self.meshes {
             renderer.set_transform(scene, *inst, at, xf);
             renderer.set_interior(scene, *inst, 0.0);
@@ -1174,6 +1267,7 @@ impl DriverFigure {
     fn hand_targets(&mut self, v: &VehicleInstance, dt: f32) -> Option<Targets> {
         let w = self.wheel.as_ref()?;
         let (_, centre, axis, up, right) = Self::wheel_frame(w, v);
+        let rim = w.radius;
         let h = self.heading.to_radians();
         let fwd = Vec3::new(h.sin(), h.cos(), 0.0);
         let mut t = Targets {
@@ -1187,7 +1281,7 @@ impl DriverFigure {
             let a = seen.to_radians();
             let radial = (up * a.cos() + right * a.sin()).normalize_or(up);
             let along = (right * a.cos() - up * a.sin()).normalize_or(right);
-            let tube = centre + radial * w.radius + (axis * 0.85 + radial * 0.3) * (LIFT * lift);
+            let tube = centre + radial * rim + (axis * 0.85 + radial * 0.3) * (LIFT * lift);
             // the forearm: from the elbow as last posed, else from about where it will be
             let elbow = self.elbows.map(|e| e[k]).unwrap_or(
                 self.hip + Vec3::Z * 0.2 - fwd * 0.05 + (tube - centre).with_z(0.0) * 0.5,
@@ -1237,6 +1331,21 @@ impl DriverFigure {
                     palm = q * Vec3::Y;
                 }
             }
+            if k == self.errand_hand
+                && self.errand_w > 0.0
+                && let Some((surface, edir, epalm)) = self.errand_place(fwd, dt)
+            {
+                let e = smooth(self.errand_w);
+                // out round the rim: the lap lies under it
+                let at = surface - epalm * (0.022 - self.grip_radius);
+                let bend = tube + radial * 0.13 + Vec3::Z * 0.05;
+                tube = tube * (1.0 - e) * (1.0 - e) + bend * (2.0 * e * (1.0 - e)) + at * (e * e);
+                let q = frame_quat(dir, palm)
+                    .slerp(frame_quat(edir, epalm), e)
+                    .normalize();
+                dir = q * Vec3::X;
+                palm = q * Vec3::Y;
+            }
             // the hand turns into its new frame over a moment, not in one frame
             let (dir, palm) = match self.frames[k] {
                 Some((d0, p0)) if dt > 0.0 => {
@@ -1277,10 +1386,19 @@ impl DriverFigure {
             heading: self.heading as f64,
             frame: 1,
             seat: Some(self.to_person(hip)),
-            look: Some(self.to_person(hip + fwd * 20.0 + Vec3::Z * 0.4)),
-            grips: targets.map(|t| [0, 1].map(|k| self.to_person(t.grips[k]) + self.grip_fix[k])),
+            look: Some(self.to_person(self.look_at.unwrap_or(hip + fwd * 20.0 + Vec3::Z * 0.4))),
+            grips: targets.map(|t| {
+                [0, 1].map(|k| {
+                    self.to_person(t.grips[k]) + self.grip_fix[k] * (1.0 - self.off_wheel(k))
+                })
+            }),
             grip_frames: targets.map(|t| t.frames.map(|(d, p)| (turn_person(d), turn_person(p)))),
             grip_lean: self.lean,
+            pedals: self.feet.map(|f| f.map(|f| self.to_person(f))),
+            sway: {
+                let a = turn_person(self.motion.acc);
+                Vec2::new(a.x, a.y)
+            },
             ..Default::default()
         }
     }
@@ -1389,7 +1507,193 @@ impl DriverFigure {
         if let Some(sh) = &self.shifter {
             a[sh.hand] = self.shift.w > 0.0;
         }
+        if self.errand_w > 0.0 {
+            a[self.errand_hand] = true;
+        }
         a
+    }
+
+    fn off_wheel(&self, k: usize) -> f32 {
+        if k == self.errand_hand {
+            smooth(self.errand_w)
+        } else {
+            0.0
+        }
+    }
+
+    /// Only time that moved the bus counts: posed twice a step, every other frame read as a stop.
+    fn track(&mut self, v: &VehicleInstance, dt: f32) {
+        if !(dt > 0.0) {
+            return;
+        }
+        let m = &mut self.motion;
+        m.pending += dt;
+        let Some((p, was)) = m.last else {
+            m.last = Some((v.position, DVec3::ZERO));
+            m.pending = 0.0;
+            return;
+        };
+        if v.position == p && m.pending < 0.25 {
+            return;
+        }
+        let span = m.pending as f64;
+        m.pending = 0.0;
+        let vel = (v.position - p) / span;
+        let acc = ((vel - was) / span).as_vec3().clamp_length_max(12.0);
+        let acc = v.body_rotation().inverse().transform_vector3(acc);
+        m.acc += (acc - m.acc) * (span as f32 / 0.3).min(1.0);
+        m.last = Some((v.position, vel));
+        m.speed = vel.truncate().length() as f32;
+        m.stood = if m.speed < 0.3 {
+            m.stood + span as f32
+        } else {
+            0.0
+        };
+    }
+
+    fn update_errand(&mut self, v: &VehicleInstance, dt: f32) {
+        let k = self.errand_hand;
+        let stood = self.motion.stood;
+        if stood == 0.0 {
+            self.rests = None;
+        } else if stood > 3.0 && self.rests.is_none() {
+            let p = v.position;
+            let h = ((p.x * 7.13 + p.y * 3.71).sin() * 43758.545).fract().abs();
+            self.rests = Some(h < 0.7);
+        }
+        let gas = self
+            .pedals
+            .as_ref()
+            .and_then(|p| p.throttle.as_ref())
+            .map(|p| p.value(v))
+            .unwrap_or(0.0);
+        let lever_busy = self
+            .shifter
+            .as_ref()
+            .is_some_and(|sh| sh.hand == k && self.shift.w > 0.0);
+        let free = !lever_busy && self.hands[1 - k].mv.is_none();
+        let want = match self.cue.desk {
+            Some(p) if free && stood > 0.5 => Some(Errand::Desk(p)),
+            _ if free
+                && self.rests == Some(true)
+                && gas < 0.02
+                && self.rate.abs() < 20.0
+                && crate::humans::Humans::any_door_open(v) =>
+            {
+                Some(Errand::Lap)
+            }
+            _ => None,
+        };
+        match want {
+            Some(e) => {
+                if self.errand_w == 0.0
+                    && let Some(m) = self.hands[k].mv.take()
+                {
+                    self.hands[k].on_rim = m.to - self.theta;
+                }
+                self.errand = Some(e);
+                self.errand_w = (self.errand_w + dt / 0.5).min(1.0);
+            }
+            None => {
+                self.errand_w = (self.errand_w - dt / 0.45).max(0.0);
+                if self.errand_w == 0.0 {
+                    self.errand = None;
+                }
+            }
+        }
+        if self.errand_w > 0.0 {
+            self.hands[k] = Hand {
+                on_rim: REST[k] - self.theta,
+                mv: None,
+            };
+        }
+    }
+
+    fn errand_place(&mut self, fwd: Vec3, dt: f32) -> Option<(Vec3, Vec3, Vec3)> {
+        let goal = self.errand_target(fwd)?;
+        if self.errand != self.errand_shown {
+            self.errand_shown = self.errand;
+            self.errand_from = self.errand_now.filter(|_| self.errand_w > 0.05);
+            self.errand_t = 0.0;
+        }
+        self.errand_t = (self.errand_t + dt / 0.5).min(1.0);
+        let now = match self.errand_from {
+            Some((p, d, n)) if self.errand_t < 1.0 => {
+                let e = smooth(self.errand_t);
+                let q = frame_quat(d, n)
+                    .slerp(frame_quat(goal.1, goal.2), e)
+                    .normalize();
+                (
+                    p.lerp(goal.0, e) + Vec3::Z * (0.06 * (e * std::f32::consts::PI).sin()),
+                    q * Vec3::X,
+                    q * Vec3::Y,
+                )
+            }
+            _ => goal,
+        };
+        self.errand_now = Some(now);
+        Some(now)
+    }
+
+    fn errand_target(&self, fwd: Vec3) -> Option<(Vec3, Vec3, Vec3)> {
+        let k = self.errand_hand;
+        let side = if k == 1 { 1.0 } else { -1.0 };
+        let right = Vec3::new(fwd.y, -fwd.x, 0.0);
+        match self.errand? {
+            Errand::Lap => {
+                let (hip, knee) = self.thighs?[k];
+                let along = (knee - hip).with_z(0.0).normalize_or(fwd);
+                let dir = (along - right * (0.35 * side)).normalize_or(along);
+                let on = hip.lerp(knee, 0.55) + Vec3::Z * 0.075 - right * (0.02 * side);
+                Some((on, dir, -Vec3::Z))
+            }
+            Errand::Desk(p) => {
+                let shoulder = self.hip + fwd * self.slide + Vec3::Z * 0.55 + right * (0.16 * side);
+                let dir = (p - shoulder).with_z(0.0).normalize_or(fwd);
+                Some((p + Vec3::Z * 0.01, dir, -Vec3::Z))
+            }
+        }
+    }
+
+    fn attend(&mut self, v: &VehicleInstance, dt: f32) {
+        let h = self.heading.to_radians();
+        let fwd = Vec3::new(h.sin(), h.cos(), 0.0);
+        let speed = self.motion.speed;
+        self.feet = self
+            .pedals
+            .as_mut()
+            .map(|p| p.feet(v, speed, dt))
+            .unwrap_or([None; 2]);
+        let eye = self.hip + fwd * self.slide + Vec3::Z * 0.65;
+        let steer = self
+            .wheel
+            .as_ref()
+            .map(|w| (self.theta / w.factor.abs()).clamp(-1.0, 1.0))
+            .unwrap_or(0.0);
+        let axles = &v.ty.def.axles;
+        let wheelbase = axles.iter().map(|a| a.long).fold(f32::MIN, f32::max)
+            - axles.iter().map(|a| a.long).fold(f32::MAX, f32::min);
+        let wheelbase = if wheelbase.is_finite() && wheelbase > 1.0 {
+            wheelbase
+        } else {
+            5.5
+        };
+        let door = self.cue.door.or_else(|| {
+            cabin_of(&v.ty.def)
+                .and_then(|c| c.ticket_sales.first().map(|t| Vec3::from(t.pos)))
+                .map(|p| p + Vec3::new(0.4, 0.2, 0.2))
+        });
+        let scene = gaze::Scene {
+            speed,
+            steer,
+            doors_open: crate::humans::Humans::any_door_open(v),
+            customer: self.cue.customer,
+            desk_hand: self.cue.desk.filter(|_| self.errand_w > 0.3),
+            door,
+        };
+        if let Some(g) = self.gaze.as_mut() {
+            self.look_at = Some(g.update(&scene, eye, fwd, wheelbase, dt));
+        }
     }
 
     /// How far the fingers of hand `k` are open on their way to the knob and back (0 closed).
@@ -1654,6 +1958,125 @@ fn turn_towards(a: Vec3, b: Vec3, max: f32) -> Vec3 {
 }
 
 impl DriverFigure {
+    /// `OMSI_TRACE_DRIVER=<csv>`: the first driver's skeleton, every frame.
+    fn write_trace(
+        &mut self,
+        v: &VehicleInstance,
+        posed: &::simulation::human::Posed,
+        at: glam::DVec3,
+        xf: Mat4,
+        dt: f32,
+    ) {
+        use std::io::Write;
+        static TAKEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if self.trace.is_none() {
+            let Ok(path) = ::legacy_config::env::var("OMSI_TRACE_DRIVER") else {
+                return;
+            };
+            if TAKEN.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                return;
+            }
+            let Ok(f) = std::fs::File::create(path) else {
+                return;
+            };
+            let mut w = std::io::BufWriter::new(f);
+            let mut head = String::from(
+                "t,clock,speed,theta,wx,wy,wz,ax,ay,az,radius,kx,ky,kz,lever,vx,vy,vz,heading,qx,qy,qz,qw,lx,ly,lz,errand,customer,desk,doors,foot_x,foot_y,foot_z,accx,accy,stood,rests",
+            );
+            for n in ::simulation::human::SKELETON {
+                head += &format!(",{n}_x,{n}_y,{n}_z");
+            }
+            let _ = writeln!(w, "{head}");
+            self.trace = Some((w, 0.0));
+        }
+        let body = v.body_rotation();
+        let world = |p: Vec3| at + xf.transform_vector3(p).as_dvec3();
+        let model = |p: Vec3| v.position + body.transform_point3(p).as_dvec3();
+        let (wc, wa, radius) = match &self.wheel {
+            Some(w) => {
+                let (_, c, a, _, _) = Self::wheel_frame(w, v);
+                (model(c), body.transform_vector3(a), w.radius)
+            }
+            None => (glam::DVec3::NAN, Vec3::NAN, f32::NAN),
+        };
+        let knob = self
+            .shifter
+            .as_ref()
+            .map(|sh| {
+                let turn = v
+                    .mesh_transforms
+                    .get(sh.mesh)
+                    .copied()
+                    .unwrap_or(Mat4::IDENTITY);
+                model(turn.transform_point3(sh.grab))
+            })
+            .unwrap_or(glam::DVec3::NAN);
+        let speed = v.physics.velocity_kmh();
+        let Some((w, t)) = self.trace.as_mut() else {
+            return;
+        };
+        *t += dt;
+        let mut line = format!(
+            "{:.3},{:.3},{speed:.2},{:.1},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{radius:.3},{:.3},{:.3},{:.3},{:.2}",
+            *t,
+            v.host.clock.run_time,
+            self.theta,
+            wc.x,
+            wc.y,
+            wc.z,
+            wa.x,
+            wa.y,
+            wa.z,
+            knob.x,
+            knob.y,
+            knob.z,
+            self.shift.w
+        );
+        let q = glam::Quat::from_mat4(&body);
+        line += &format!(
+            ",{:.4},{:.4},{:.4},{:.3},{:.5},{:.5},{:.5},{:.5}",
+            v.position.x, v.position.y, v.position.z, v.heading, q.x, q.y, q.z, q.w
+        );
+        let look = self.look_at.map(model).unwrap_or(glam::DVec3::NAN);
+        let foot = self.feet[1].map(model).unwrap_or(glam::DVec3::NAN);
+        line += &format!(
+            ",{:.3},{:.3},{:.3},{:.2},{},{},{},{:.3},{:.3},{:.3},{:.2},{:.2},{:.2},{}",
+            look.x,
+            look.y,
+            look.z,
+            self.errand_w,
+            self.cue.customer.is_some() as u8,
+            self.cue.desk.is_some() as u8,
+            crate::humans::Humans::any_door_open(v) as u8,
+            foot.x,
+            foot.y,
+            foot.z,
+            self.motion.acc.x,
+            self.motion.acc.y,
+            self.motion.stood,
+            self.rests.map(|r| r as i8).unwrap_or(-1)
+        );
+        for p in posed.skeleton(&self.ty.rig) {
+            let q = world(p);
+            line += &format!(",{:.4},{:.4},{:.4}", q.x, q.y, q.z);
+        }
+        let _ = writeln!(w, "{line}");
+    }
+
+    pub fn seat_point(&self) -> (Vec3, f32, f32) {
+        let h = self.heading.to_radians();
+        let fwd = Vec3::new(h.sin(), h.cos(), 0.0);
+        (
+            self.hip + fwd * self.slide,
+            self.heading,
+            self.hip.z - self.floor.z,
+        )
+    }
+
+    pub fn take_wheel_from_lap(&mut self) {
+        self.pose.release_grip();
+    }
+
     /// The figure at the wheel (the player's own when getting up).
     pub fn human_type(&self) -> Arc<HumanType> {
         self.ty.clone()
@@ -1662,6 +2085,20 @@ impl DriverFigure {
 
 fn wrap(a: f32) -> f32 {
     (a + 540.0).rem_euclid(360.0) - 180.0
+}
+
+/// An AI copy of a bus keeps no vertices on the CPU: they are read from its file.
+fn positions_of(v: &VehicleInstance, i: usize) -> Vec<Vec3> {
+    let vm = &v.ty.meshes[i];
+    let have: &[Vec3] = &vm.data.positions;
+    if have.len() >= 12 {
+        have.to_vec()
+    } else {
+        ::legacy_o3d::load_mesh(&vm.file)
+            .ok()
+            .map(|m| ::geometry::mesh_from_o3d(&m).positions)
+            .unwrap_or_default()
+    }
 }
 
 /// The foot of the lever and where a hand holds its knob: the knob is the far end of the mesh
@@ -1706,35 +2143,58 @@ fn lever_knob(positions: &[Vec3], pivot: Option<Vec3>) -> Option<(Vec3, Vec3)> {
     Some((tip - axis * 0.02, axis))
 }
 
+const STRONG: &[&str] = &[
+    "gearlever",
+    "gear_lever",
+    "gearshift",
+    "gear_shift",
+    "shiftlever",
+    "shift_lever",
+    "shifter",
+    "gearstick",
+    "gear_stick",
+    "schalthebel",
+    "schaltknueppel",
+    "schaltung",
+    "antriebshebel",
+    "antriebhebel",
+    "antrieb_hebel",
+];
+const WEAK: &[&str] = &["antrieb", "gear", "shift", "schalt", "getriebe"];
+/// "Schalter": the MAN's wiper switch was taken for its gear lever.
+const NOT: &[&str] = &[
+    "light", "lamp", "display", "indic", "sound", "retard", "park", "door", "wiper", "text",
+    "warn", "oil", "temp", "rpm", "tacho", "taster", "button", "btn", "schalter", "wisch", "blink",
+    "licht", "hupe", "tuer", "spiegel", "heiz",
+];
+
+fn lever_grade(name: &str, forced: Option<&str>) -> u8 {
+    let n = name.to_ascii_lowercase();
+    if let Some(f) = forced {
+        return if n.contains(f) { 3 } else { 0 };
+    }
+    if NOT.iter().any(|w| n.contains(w)) {
+        0
+    } else if STRONG.iter().any(|w| n.contains(w)) {
+        2
+    } else if WEAK.iter().any(|w| n.contains(w)) {
+        1
+    } else {
+        0
+    }
+}
+
 /// The gear lever of a manual bus: the mesh near the seat that a gear/shift variable animates
 /// (or, failing that, one whose file name says it is a gear lever), the one best named and
 /// nearest winning. `OMSI_DRIVER_SHIFTER=<part of a variable or file name>` forces the pick.
 /// The hand that works it is the one on the lever's side of the seat (the lever stands right
 /// of a left-hand-drive driver and left of a right-hand-drive one).
-fn find_shifter(v: &VehicleInstance, hip: Vec3, heading: f32) -> Option<Shifter> {
-    const STRONG: &[&str] = &[
-        "gearlever",
-        "gear_lever",
-        "gearshift",
-        "gear_shift",
-        "shiftlever",
-        "shift_lever",
-        "shifter",
-        "gearstick",
-        "gear_stick",
-        "schalthebel",
-        "schaltknueppel",
-        "schaltung",
-        "antriebshebel",
-        "antriebhebel",
-        "antrieb_hebel",
-    ];
-    // "Antrieb" is what OMSI models usually call the gearbox / its lever.
-    const WEAK: &[&str] = &["antrieb", "gear", "shift", "schalt", "getriebe"];
-    const NOT: &[&str] = &[
-        "light", "lamp", "display", "indic", "sound", "retard", "park", "door", "wiper", "text",
-        "warn", "oil", "temp", "rpm", "tacho", "taster", "button", "btn",
-    ];
+fn find_shifter(
+    v: &VehicleInstance,
+    hip: Vec3,
+    heading: f32,
+    wheel: Option<&Wheel>,
+) -> Option<Shifter> {
     let forced = ::legacy_config::env::var("OMSI_DRIVER_SHIFTER")
         .ok()
         .map(|s| s.trim().to_ascii_lowercase())
@@ -1743,34 +2203,7 @@ fn find_shifter(v: &VehicleInstance, hip: Vec3, heading: f32) -> Option<Shifter>
     if matches!(forced.as_deref(), Some("off") | Some("none") | Some("0")) {
         return None;
     }
-    // How well a variable name says "gear lever": 0 not at all .. 3 forced.
-    let grade = |name: &str| -> u8 {
-        let n = name.to_ascii_lowercase();
-        if let Some(f) = &forced {
-            return if n.contains(f.as_str()) { 3 } else { 0 };
-        }
-        if NOT.iter().any(|w| n.contains(w)) {
-            0
-        } else if STRONG.iter().any(|w| n.contains(w)) {
-            2
-        } else if WEAK.iter().any(|w| n.contains(w)) {
-            1
-        } else {
-            0
-        }
-    };
-    let positions_of = |i: usize| -> Vec<Vec3> {
-        let vm = &v.ty.meshes[i];
-        let have: &[Vec3] = &vm.data.positions;
-        if have.len() >= 12 {
-            have.to_vec()
-        } else {
-            ::legacy_o3d::load_mesh(&vm.file)
-                .ok()
-                .map(|m| ::geometry::mesh_from_o3d(&m).positions)
-                .unwrap_or_default()
-        }
-    };
+    let grade = |name: &str| lever_grade(name, forced.as_deref());
     let shoulder = hip + Vec3::Z * 0.5;
     let mut best: Option<(f32, usize, Vec<String>, Vec3, Vec3)> = None;
     for (i, vm) in v.ty.meshes.iter().enumerate() {
@@ -1804,7 +2237,7 @@ fn find_shifter(v: &VehicleInstance, hip: Vec3, heading: f32) -> Option<Shifter>
             }
             grade_of_mesh = 1;
         }
-        let positions = positions_of(i);
+        let positions = positions_of(v, i);
         if positions.len() < 8 {
             continue;
         }
@@ -1818,6 +2251,13 @@ fn find_shifter(v: &VehicleInstance, hip: Vec3, heading: f32) -> Option<Shifter>
         };
         if (grab - shoulder).length() > LEVER_REACH {
             continue;
+        }
+        if let Some(w) = wheel {
+            let d = grab - w.centre;
+            let along = w.axis.dot(d);
+            if (d - w.axis * along).length() < w.radius + 0.05 && along.abs() < 0.4 {
+                continue;
+            }
         }
         let score = grade_of_mesh as f32 * 2.0 - dist;
         if best.as_ref().map(|b| score > b.0).unwrap_or(true) {
@@ -2022,4 +2462,21 @@ fn find_wheel(v: &VehicleInstance, hip: Vec3) -> Option<Wheel> {
         radius,
         tube,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_switch_on_the_column_is_no_gear_lever() {
+        assert_eq!(lever_grade("cockpit_wischer_drehschalter", None), 0);
+        assert_eq!(lever_grade("Blinkerschalter", None), 0);
+        assert_eq!(lever_grade("Schalthebel_Gang", None), 2);
+        assert_eq!(lever_grade("antrieb_wahl", None), 1);
+        assert_eq!(
+            lever_grade("cockpit_wischer_drehschalter", Some("wischer")),
+            3
+        );
+    }
 }

@@ -947,6 +947,8 @@ pub struct PoseInput<'a> {
     /// Extra forward lean towards the grips (degrees): a driver whose wheel is far off leans
     /// to it from the seat instead of leaving it.
     pub grip_lean: f32,
+    /// Seated: where the ball of each foot presses a pedal.
+    pub pedals: [Option<Vec3>; 2],
     /// Hold on to a handrail (0 … 1).
     pub hold: f32,
     /// Acceleration of the floor under the person (a moving bus), model frame, m/s².
@@ -971,6 +973,7 @@ impl Default for PoseInput<'_> {
             grips: None,
             grip_frames: None,
             grip_lean: 0.0,
+            pedals: [None; 2],
             hold: 0.0,
             sway: Vec2::ZERO,
             floor: None,
@@ -1087,6 +1090,8 @@ pub struct Pose {
     grip_frame: Option<[(Vec3, Vec3); 2]>,
     /// Extra lean towards the wheel (degrees, eased).
     grip_extra: f32,
+    pedal_at: [Vec3; 2],
+    pedal_w: [f32; 2],
     hold: f32,
     /// Head direction (degrees: right, up) and where a glance goes and for how long.
     head: Vec2,
@@ -1140,6 +1145,76 @@ pub struct Posed {
     /// the last good mesh).
     pub ok: bool,
 }
+
+impl Pose {
+    pub fn release_grip(&mut self) {
+        self.grip = 0.0;
+    }
+}
+
+impl Posed {
+    pub fn skeleton(&self, rig: &Rig) -> [Vec3; 21] {
+        let b = &self.bones;
+        let at = |slot: usize, p: Vec3| b[slot].transform_point3(p);
+        let hand = |k: usize| at(HAND[k], rig.wrist[k] + rig.hand_axis[k] * rig.hand_len);
+        let toe = |k: usize| {
+            at(
+                TOE[k],
+                Vec3::new(rig.ankle[k].x, rig.ankle[k].y + rig.toe, rig.sole),
+            )
+        };
+        [
+            at(HIP, rig.pelvis),
+            self.hip[0],
+            self.hip[1],
+            self.knee[0],
+            self.knee[1],
+            self.ankle[0],
+            self.ankle[1],
+            toe(0),
+            toe(1),
+            at(MAIN, rig.waist),
+            self.neck,
+            at(HEAD, Vec3::new(rig.neck.x, rig.head_pivot.y, rig.head_top)),
+            at(UPPER[0], rig.shoulder[0]),
+            at(UPPER[1], rig.shoulder[1]),
+            self.elbow[0],
+            self.elbow[1],
+            self.wrist[0],
+            self.wrist[1],
+            hand(0),
+            hand(1),
+            at(
+                HEAD,
+                rig.head_pivot + Vec3::new(0.0, 0.12 * rig.scale, 0.04),
+            ),
+        ]
+    }
+}
+
+pub const SKELETON: [&str; 21] = [
+    "pelvis",
+    "hip_l",
+    "hip_r",
+    "knee_l",
+    "knee_r",
+    "ankle_l",
+    "ankle_r",
+    "toe_l",
+    "toe_r",
+    "waist",
+    "neck",
+    "head",
+    "shoulder_l",
+    "shoulder_r",
+    "elbow_l",
+    "elbow_r",
+    "wrist_l",
+    "wrist_r",
+    "hand_l",
+    "hand_r",
+    "nose",
+];
 
 fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
     let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
@@ -1259,6 +1334,8 @@ impl Pose {
             grip_at: [Vec3::new(-0.2, 0.4, 1.0), Vec3::new(0.2, 0.4, 1.0)],
             grip_frame: None,
             grip_extra: 0.0,
+            pedal_at: [Vec3::ZERO; 2],
+            pedal_w: [0.0; 2],
             hold: 0.0,
             head: Vec2::ZERO,
             glance: Vec2::ZERO,
@@ -1687,6 +1764,15 @@ impl Pose {
                 self.grip = approach(self.grip, 1.0, dt / 0.8);
             }
             None => self.grip = approach(self.grip, 0.0, dt / 0.8),
+        }
+        for side in 0..2 {
+            match input.pedals[side].filter(|p| p.is_finite()) {
+                Some(p) if seated => {
+                    self.pedal_at[side] = p;
+                    self.pedal_w[side] = approach(self.pedal_w[side], 1.0, dt / 0.4);
+                }
+                _ => self.pedal_w[side] = approach(self.pedal_w[side], 0.0, dt / 0.4),
+            }
         }
         let hold_to = if seated {
             0.0
@@ -2266,6 +2352,27 @@ impl Pose {
             foot_fwd[side] = yaw_quat(yaw_l) * Vec3::Y;
             foot_yaw[side] = yaw_l;
         }
+        for side in 0..2 {
+            let w = smoothstep(0.0, 1.0, self.pedal_w[side]) * smoothstep(0.6, 1.0, sit);
+            if w <= 0.0 {
+                continue;
+            }
+            let ball = self.pedal_at[side];
+            let floor = self.body_floor;
+            let foot = rig.ball - rig.heel;
+            let rise = (ball.z - floor).clamp(0.0, foot * 0.85);
+            let pitch = (rise / foot).asin();
+            let yaw = d(6.0) * SIDE[side];
+            let rot = Quat::from_rotation_z(-yaw) * Quat::from_rotation_x(pitch);
+            let heel = ball - rot * Vec3::new(0.0, foot, 0.0);
+            let heel = Vec3::new(heel.x, heel.y, heel.z.max(floor));
+            let ankle = heel - rot * Vec3::new(0.0, rig.heel, -rig.ankle_h);
+            ankle_t[side] = ankle_t[side].lerp(ankle, w);
+            let now = Quat::from_mat3a(&foot_rot[side]);
+            foot_rot[side] = Mat3A::from_quat(now.slerp(rot, w));
+            foot_fwd[side] = foot_fwd[side].lerp(rot * Vec3::Y, w).normalize_or(Vec3::Y);
+            toe_bend[side] *= 1.0 - w;
+        }
         if stumble > 0.0 {
             let step =
                 self.stumble_dir.extend(0.0) * ((0.04 + 0.12 * self.stumble_strength) * stumble);
@@ -2304,7 +2411,7 @@ impl Pose {
         // A driver has a small natural lean towards the wheel.  The caller may add a modest
         // reach correction for an unusually placed rim, but a seated figure should remain
         // upright rather than folding over the dashboard.
-        let grip_lean = d(4.0 + self.grip_extra.clamp(0.0, 8.0)) * smoothstep(0.0, 1.0, self.grip);
+        let grip_lean = d(4.0 + self.grip_extra.clamp(0.0, 16.0)) * smoothstep(0.0, 1.0, self.grip);
         // forward tilt walking, backwards on a seat
         let pelvis_tilt =
             d(2.0) * walk + d(11.0) * run - d(12.0) * s_ease + reach_lean * 0.5 + grip_lean * 0.7;
@@ -2440,7 +2547,15 @@ impl Pose {
             // the shin hanging down. A floor further down than that (a seat on a podium or
             // over a wheel arch) is not reached by stretching the leg straight at it - the
             // leg ran diagonally through the seat's front - the feet hang above it instead.
-            if sit > 0.5 {
+            let pedal = smoothstep(0.0, 1.0, self.pedal_w[side]) * smoothstep(0.6, 1.0, sit);
+            if pedal > 0.0 {
+                let reach = (rig.thigh + rig.shin) * 0.985;
+                let v = ankle_t[side] - hip_at;
+                if v.length() > reach {
+                    ankle_t[side] = hip_at + v * (1.0 - pedal + pedal * reach / v.length());
+                }
+            }
+            if sit > 0.5 && pedal < 1.0 {
                 let flat = Vec3::new(pelvis_fwd.x, pelvis_fwd.y, 0.0).normalize_or(Vec3::Y);
                 let knee_n = hip_at + flat * rig.thigh * 0.95;
                 let hang = knee_n - Vec3::Z * rig.shin * 0.97;
@@ -3898,6 +4013,39 @@ mod tests {
                 "wrist floats above the surface: {above}"
             );
         }
+    }
+
+    #[test]
+    fn a_foot_on_a_pedal_presses_it_with_the_ball_the_heel_on_the_floor() {
+        let r = rig();
+        let seat = Vec3::new(0.0, -r.seat_front(), 0.45);
+        let pedal = Vec3::new(0.12, 0.3, 0.09);
+        let input = PoseInput {
+            activity: Activity::Sit,
+            seat: Some(seat),
+            pedals: [None, Some(pedal)],
+            ..Default::default()
+        };
+        let mut pose = Pose::new(9);
+        for _ in 0..120 {
+            pose.advance(&r, &input, 1.0 / 30.0);
+        }
+        let p = pose.bones(&r);
+        assert!(p.ok);
+        let foot = Mat3A::from(p.bones[FOOT[1]].matrix3);
+        let ball = p.bones[FOOT[1]].transform_point3(r.ball_joint(1))
+            - Vec3::from(foot * Vec3A::Z) * r.ball_h;
+        assert!(
+            (ball - pedal).length() < 0.03,
+            "the ball on the pedal: {ball:?}"
+        );
+        let heel = p.ankle[1] + Vec3::from(foot * Vec3A::new(0.0, r.heel, -r.ankle_h));
+        assert!(heel.z.abs() < 0.02, "the heel on the floor: {heel:?}");
+        assert!(
+            p.ankle_flex[1] > 0.0 || foot.y_axis.z > 0.2,
+            "toes up on the pedal"
+        );
+        assert!((p.ankle[0].z - r.ankle_h).abs() < 0.05);
     }
 
     #[test]

@@ -399,6 +399,13 @@ impl App {
             }
             let inside = self.in_cab;
             p.sync_transforms(r, scene, inside);
+            if let Some(d) = p.driver.as_mut() {
+                d.cue = self
+                    .humans
+                    .as_ref()
+                    .map(|h| h.driver_cue())
+                    .unwrap_or_default();
+            }
             p.sync_driver_hands(
                 r,
                 scene,

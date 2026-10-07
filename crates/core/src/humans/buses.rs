@@ -2,7 +2,7 @@ use super::*;
 
 /// Associate seated places with a cabin floor path; actual foot-root alignment uses
 /// each human's measured rig rather than this shared lookup offset.
-const SEAT_FRONT: f32 = 0.34;
+pub(super) const SEAT_FRONT: f32 = 0.34;
 
 /// A bus as the passengers know it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

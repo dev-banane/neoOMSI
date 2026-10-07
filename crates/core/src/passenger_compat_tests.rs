@@ -1573,6 +1573,7 @@ fn avatar_type_selection_uses_weighted_population_not_registry_length() {
             seat: None,
             floor: None,
             aboard: None,
+            wheel: None,
         },
         2,
     );
@@ -2802,4 +2803,49 @@ fn installed_buses_provide_passenger_runtime_controls() {
         report,
     )
     .unwrap();
+}
+
+#[test]
+fn the_driver_getting_up_sits_at_the_wheel_first_and_then_stands_up() {
+    let f = Fixture::new();
+    let driver = f.human_at("Humans/Test/Driver.hum", None);
+    let other = f.human_at("Humans/Test/Other.hum", None);
+    let mut h = Humans::new(&f.root);
+    h.types.clear();
+    h.population.clear();
+    h.alternates.clear();
+    h.types.push(other);
+    h.population.push(0);
+    h.map_humans_done = true;
+    let renderer = noop_renderer();
+    let mut scene = renderer.new_scene();
+    let b = bus(cabin());
+    let ix = [(b.id, 0)].into_iter().collect();
+    let kind = h.avatar_figure(driver.clone());
+    let cmd = |wheel| AvatarCmd {
+        pos: DVec3::ZERO,
+        heading: 0.0,
+        vel: DVec2::ZERO,
+        lift: 0.0,
+        seat: None,
+        floor: None,
+        aboard: Some((BusId::Player, Vec3::new(0.5, 0.0, 0.0))),
+        wheel,
+    };
+    let seat = Some((BusId::Player, Vec3::new(0.0, 0.0, 0.5), 0.0, 0.45));
+    h.avatar(1, &f.world, &renderer, &mut scene, cmd(seat), kind);
+    assert!(
+        Arc::ptr_eq(&h.people[0].ty, &driver),
+        "the one who drove gets up"
+    );
+    h.animate_avatar(0, 1.0 / 30.0, &f.world, std::slice::from_ref(&b), &ix);
+    assert!(
+        h.people[0].pose.sit_amount() > 0.95,
+        "sitting at the wheel when first seen, not sitting down"
+    );
+    h.avatar(1, &f.world, &renderer, &mut scene, cmd(None), kind);
+    for _ in 0..75 {
+        h.animate_avatar(0, 1.0 / 30.0, &f.world, std::slice::from_ref(&b), &ix);
+    }
+    assert!(h.people[0].pose.sit_amount() < 0.05, "stood up");
 }

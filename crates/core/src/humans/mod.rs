@@ -177,6 +177,7 @@ pub struct Humans {
     types: Vec<Arc<HumanType>>,
     /// Weighted local spawn slots into `types`; duplicate indices represent map weights.
     population: Vec<usize>,
+    next_variant: Option<usize>,
     alternates: HashMap<String, Vec<Arc<HumanType>>>,
     pub people: Vec<Person>,
     rng: u64,
@@ -368,6 +369,7 @@ impl Humans {
             avatars: Avatars {
                 avatars: HashMap::new(),
                 avatar_cmds: HashMap::new(),
+                settle: HashSet::new(),
                 avatar_hidden: HashMap::new(),
             },
             walking: PedestrianState {
@@ -421,6 +423,7 @@ impl Humans {
             },
             types,
             population,
+            next_variant: None,
             people: Vec::new(),
             rng: 0x1234_5678_9ABC_DEF1,
             next_id: 1,
@@ -740,6 +743,7 @@ impl Humans {
             }
         }
         let (ty, variant) = self.pick_figure(position, kind);
+        let variant = self.next_variant.take().unwrap_or(variant);
         let mut initial_seat = None;
         if self.ik {
             if let State::Pax(p) = &mut state {
@@ -1309,6 +1313,41 @@ impl Humans {
             "Passenger waiting for a ticket: {name} {value:.2} - press {}",
             self.ticket_key
         ))
+    }
+
+    pub fn driver_cue(&self) -> crate::driver::Cue {
+        let Some(cabin) = self.buses.player_cabin.as_ref() else {
+            return Default::default();
+        };
+        let door = cabin
+            .entries
+            .iter()
+            .filter(|d| d.sells)
+            .max_by(|a, b| a.inside.y.total_cmp(&b.inside.y))
+            .or(cabin.entries.first())
+            .map(|d| d.inside + Vec3::Z * 1.4);
+        let mut cue = crate::driver::Cue {
+            door,
+            ..Default::default()
+        };
+        let sale = cabin.sale.map(|s| s.1);
+        for p in &self.people {
+            let State::Pax(x) = &p.state else {
+                continue;
+            };
+            if x.inside != Some(BusId::Player) || x.fare_phase < FarePhase::RequestTicket {
+                continue;
+            }
+            cue.customer = Some(x.pos.as_vec3() + Vec3::Z * (p.ty.rig.neck.z + 0.08));
+            cue.desk = match x.fare_phase {
+                FarePhase::Paying | FarePhase::AwaitTicket => cabin.money_point.or(sale),
+                FarePhase::TakingTicket => sale.or(cabin.money_point),
+                FarePhase::AwaitChange => cabin.change_point.or(cabin.money_point),
+                _ => None,
+            };
+            break;
+        }
+        cue
     }
 
     /// People sitting on each `[passpos]` of the player's bus, for `GetHumanCountOnSeat`

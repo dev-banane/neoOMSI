@@ -296,6 +296,16 @@ pub(crate) fn run_offscreen(
             (v.len() >= 3).then(|| [v[0], v[1], v[2], v.get(3).copied().unwrap_or(0.0)])
         })
         .collect();
+    // OMSI_GET_UP=<up>,<down>: the driver gets up and sits back down (with --passengers)
+    let get_up: Option<(f32, f32)> = ::legacy_config::env::var("OMSI_GET_UP")
+        .ok()
+        .and_then(|s| {
+            let v: Vec<f32> = s.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+            (v.len() == 2).then(|| (v[0], v[1]))
+        });
+    let mut driver_away = false;
+    let mut cab_move: Option<crate::on_foot::wheel::CabMove> = None;
+    let mut cab_phase = 0;
     let drive_v0: Option<f32> = ::legacy_config::env::var("OMSI_DRIVE_V0")
         .ok()
         .and_then(|v| v.parse().ok());
@@ -979,8 +989,61 @@ pub(crate) fn run_offscreen(
                 }
                 // the driver's hands follow the wheel frame by frame (as in the window), so
                 // that the snapshots show them where the hand-over-hand has got to
+                if let (Some((up, down)), Some(h), Some(d)) =
+                    (get_up, humans_off.as_mut(), player.driver.as_mut())
+                {
+                    const KEY: u32 = 0x00f0_07ed;
+                    let stand = h.driver_stand(&player.vehicle);
+                    let start = |down| {
+                        stand.map(|l| {
+                            crate::on_foot::wheel::CabMove::new(
+                                crate::humans::BusId::Player,
+                                d.seat_point(),
+                                l,
+                                down,
+                            )
+                        })
+                    };
+                    if t_s >= up && cab_phase == 0 {
+                        cab_move = start(false);
+                        driver_away = true;
+                        cab_phase = 1;
+                    }
+                    if t_s >= down && cab_phase == 1 {
+                        cab_move = start(true);
+                        cab_phase = 2;
+                    }
+                    if let Some(c) = cab_move.as_mut() {
+                        let s = c.step(dt);
+                        let hd = player.vehicle.heading + s.heading as f64;
+                        let cmd = crate::humans::AvatarCmd {
+                            pos: player.vehicle.position,
+                            heading: hd,
+                            vel: s.vel.as_dvec2(),
+                            lift: 0.0,
+                            seat: None,
+                            floor: None,
+                            aboard: Some((crate::humans::BusId::Player, s.at)),
+                            wheel: s.wheel,
+                        };
+                        let kind = h.avatar_figure(d.human_type());
+                        h.avatar(KEY, &world, &renderer, &mut scene, cmd, kind);
+                        if s.done && c.sitting_down {
+                            h.avatar_remove(KEY);
+                            d.take_wheel_from_lap();
+                            driver_away = false;
+                            cab_move = None;
+                        }
+                    }
+                }
                 if ::config::get_bool("gameplay", "driver").unwrap_or(true) && !snapshot_times.is_empty() {
-                    player.sync_driver(&renderer, &mut scene, dt, true, false);
+                    if let Some(d) = player.driver.as_mut() {
+                        d.cue = humans_off
+                            .as_ref()
+                            .map(|h| h.driver_cue())
+                            .unwrap_or_default();
+                    }
+                    player.sync_driver(&renderer, &mut scene, dt, !driver_away, false);
                 }
                 // OMSI_SUSP_TRACE=<csv>: every frame, the body's height and vertical speed and
                 // each wheel's travel, load and the ground under it (bumps and hops)
@@ -1297,7 +1360,7 @@ pub(crate) fn run_offscreen(
                         &renderer,
                         &mut scene,
                         1.0 / 30.0,
-                        ::config::get_bool("gameplay", "driver").unwrap_or(true),
+                        ::config::get_bool("gameplay", "driver").unwrap_or(true) && !driver_away,
                         args.view == "driver",
                     );
                     if args.cam.is_none() && args.view != "free" && args.follow.is_none() {

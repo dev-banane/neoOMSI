@@ -154,7 +154,7 @@ impl App {
         let away = (pos.truncate() - v.position.truncate()).dot(right).signum();
         let face = (right * away).x.atan2((right * away).y).to_degrees();
         let kind = match (driver_ty, self.humans.as_mut()) {
-            (Some(t), Some(h)) => h.type_index(t) as u64,
+            (Some(t), Some(h)) => h.avatar_figure(t),
             _ => self.args.root.to_string_lossy().len() as u64 * 7 + 3,
         };
         let look_yaw = self
@@ -209,6 +209,15 @@ impl App {
         };
         f.kind = kind;
         f.transit = transit;
+        if let (Some((_, l)), Some(seat)) = (
+            inside,
+            self.player
+                .as_ref()
+                .and_then(|p| p.driver.as_ref())
+                .map(|d| d.seat_point()),
+        ) {
+            f.cab = Some(super::wheel::CabMove::new(BusId::Player, seat, l, false));
+        }
         self.on_foot = Some(f);
         self.view = "foot".into();
     }
@@ -412,6 +421,11 @@ impl App {
         let Some(f) = self.on_foot.take() else { return };
         if let Some(h) = self.humans.as_mut() {
             h.avatar_remove(AVATAR_KEY);
+        }
+        if f.cab.is_some()
+            && let Some(d) = self.player.as_mut().and_then(|p| p.driver.as_mut())
+        {
+            d.take_wheel_from_lap();
         }
         self.view = if f.view_before == "outside" || f.view_before == "driver" {
             f.view_before

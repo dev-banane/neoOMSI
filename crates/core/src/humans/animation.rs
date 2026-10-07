@@ -344,6 +344,7 @@ impl Humans {
                 grips: None,
                 grip_frames: None,
                 grip_lean: 0.0,
+                pedals: [None; 2],
                 hold: ik_hold,
                 sway: sway.truncate(),
                 floor: Some(&floor_cb),
