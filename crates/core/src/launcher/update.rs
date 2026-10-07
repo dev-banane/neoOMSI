@@ -19,6 +19,11 @@ impl Launcher {
             .unwrap_or(default)
     }
 
+    pub(super) fn check_updates(&mut self) {
+        let nightly = self.setting("update_nightly", false);
+        self.update.check(nightly);
+    }
+
     /// Once a frame (drawn or not): look for an update when the launcher has started, install
     /// one when that is what the player chose, and on a computer hand over to the new
     /// launcher once it is in place.
@@ -27,7 +32,7 @@ impl Launcher {
             if self.setting("update_check", true)
                 && ::legacy_config::env::var_os("OMSI_NO_UPDATE").is_none()
             {
-                self.update.check();
+                self.check_updates();
             } else {
                 self.update.checked_once = true;
             }
@@ -268,7 +273,7 @@ impl Launcher {
                     Some("refresh"),
                     ButtonKind::Normal,
                 ) {
-                    self.update.check();
+                    self.check_updates();
                 }
                 if self.ui.button(
                     "upd-github",

@@ -3,7 +3,8 @@
 //! Every push to main publishes a release `v<MAJOR.MINOR.COMMIT>` with one archive per
 //! platform (see .github/workflows/build.yml). The launcher asks the GitHub API for the
 //! latest release when it starts (setting `update_check`), and when it is newer than this
-//! build it offers it - or, with `update_auto`, installs it at once:
+//! build it offers it - or, with `update_auto`, installs it at once. Nightlies are only
+//! offered with `update_nightly`:
 //!
 //! * **Windows, macOS, Linux**: the archive is downloaded (and checked against the SHA-256
 //!   GitHub lists for it), unpacked into `.neoomsi-update` beside the program, and every
@@ -112,8 +113,8 @@ impl Updater {
         *lock(&self.status) = s;
     }
 
-    /// Ask GitHub for the latest release (in the background).
-    pub fn check(&mut self) {
+    /// Ask GitHub for the latest release (in the background), nightlies included or not.
+    pub fn check(&mut self, nightly: bool) {
         self.checked_once = true;
         if matches!(
             self.status(),
@@ -129,7 +130,7 @@ impl Updater {
         self.set(Status::Checking);
         let status = self.status.clone();
         std::thread::spawn(move || {
-            let s = match latest() {
+            let s = match latest(nightly) {
                 Ok(Some(r)) => Status::Available(r),
                 Ok(None) => Status::UpToDate,
                 Err(e) => {
@@ -296,23 +297,23 @@ pub(crate) fn short_error(e: &ureq::Error) -> String {
     }
 }
 
-/// The newest release (pre-releases included) when it is newer than this build and has a
-/// file for this platform.
-pub fn latest() -> anyhow::Result<Option<Release>> {
+/// The newest release (pre-releases included, nightlies only with `nightly`) when it is
+/// newer than this build and has a file for this platform.
+pub fn latest(nightly: bool) -> anyhow::Result<Option<Release>> {
     let current = current_version();
     if let Ok(url) = ::legacy_config::env::var("OMSI_UPDATE_URL") {
         let v: serde_json::Value = serde_json::from_str(&fetch_text(&url)?)?;
-        return pick_release(&v, current);
+        return pick_release(&v, current, nightly);
     }
     match fetch_text(RELEASES_API)
         .and_then(|t| Ok(serde_json::from_str::<serde_json::Value>(&t)?))
     {
-        Ok(v) => pick_release(&v, current),
+        Ok(v) => pick_release(&v, current, nightly),
         Err(e) => {
             // (no list: fall back to the latest stable release)
             log::warn!("update check: release list: {e:#}");
             let v: serde_json::Value = serde_json::from_str(&fetch_text(LATEST_API)?)?;
-            pick_release(&v, current)
+            pick_release(&v, current, nightly)
         }
     }
 }
@@ -324,9 +325,13 @@ fn published(v: &serde_json::Value) -> &str {
         .unwrap_or("")
 }
 
-fn pick_release(v: &serde_json::Value, current: &str) -> anyhow::Result<Option<Release>> {
+fn pick_release(
+    v: &serde_json::Value,
+    current: &str,
+    nightly: bool,
+) -> anyhow::Result<Option<Release>> {
     let Some(list) = v.as_array() else {
-        return parse_release(v, current);
+        return parse_release(v, current, nightly);
     };
     let bare = |t: &str| t.trim_start_matches(['v', 'V']).to_string();
     let current_time = list
@@ -335,7 +340,7 @@ fn pick_release(v: &serde_json::Value, current: &str) -> anyhow::Result<Option<R
         .map(published);
     let mut best: Option<(Release, &str)> = None;
     for raw in list {
-        if let Some(r) = parse_release_since(raw, current, current_time)? {
+        if let Some(r) = parse_release_since(raw, current, current_time, nightly)? {
             let time = published(raw);
             if best
                 .as_ref()
@@ -352,20 +357,34 @@ fn pick_release(v: &serde_json::Value, current: &str) -> anyhow::Result<Option<R
     Ok(best.map(|(r, _)| r))
 }
 
-fn parse_release(v: &serde_json::Value, current: &str) -> anyhow::Result<Option<Release>> {
-    parse_release_since(v, current, None)
+fn parse_release(
+    v: &serde_json::Value,
+    current: &str,
+    nightly: bool,
+) -> anyhow::Result<Option<Release>> {
+    parse_release_since(v, current, None, nightly)
+}
+
+fn is_nightly(version: &str) -> bool {
+    split_version(version)
+        .1
+        .is_some_and(|p| p.split('.').next() == Some("nightly"))
 }
 
 fn parse_release_since(
     v: &serde_json::Value,
     current: &str,
     current_time: Option<&str>,
+    nightly: bool,
 ) -> anyhow::Result<Option<Release>> {
     let tag = v["tag_name"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("the release has no tag"))?;
     let version = tag.trim_start_matches(['v', 'V']).to_string();
-    if v["draft"].as_bool() == Some(true) || !newer(&version, current) {
+    if v["draft"].as_bool() == Some(true)
+        || (!nightly && is_nightly(&version))
+        || !newer(&version, current)
+    {
         return Ok(None);
     }
     if order(&version, current).is_eq() && current_time.is_some_and(|c| published(v) <= c) {
@@ -934,7 +953,7 @@ mod tests {
                 {"name": name, "browser_download_url": "https://x/mine", "size": 42, "digest": "sha256:ABCDEF"}
             ]
         });
-        let r = parse_release(&v, "0.1.7").unwrap().unwrap();
+        let r = parse_release(&v, "0.1.7", true).unwrap().unwrap();
         assert_eq!(
             (
                 r.version.as_str(),
@@ -945,20 +964,20 @@ mod tests {
             ("0.1.9", "https://x/mine", 42, Some("abcdef"))
         );
         // not newer, a draft, or without this platform's file: nothing to offer
-        assert!(parse_release(&v, "0.1.9").unwrap().is_none());
+        assert!(parse_release(&v, "0.1.9", true).unwrap().is_none());
         let mut d = v.clone();
         d["draft"] = serde_json::json!(true);
-        assert!(parse_release(&d, "0.1.7").unwrap().is_none());
+        assert!(parse_release(&d, "0.1.7", true).unwrap().is_none());
         let mut n = v.clone();
         n["assets"] = serde_json::json!([]);
-        assert!(parse_release(&n, "0.1.7").unwrap().is_none());
+        assert!(parse_release(&n, "0.1.7", true).unwrap().is_none());
         // a pre-release is offered too, and flagged
         let mut p = v.clone();
         p["prerelease"] = serde_json::json!(true);
-        assert!(parse_release(&p, "0.1.7").unwrap().unwrap().prerelease);
+        assert!(parse_release(&p, "0.1.7", true).unwrap().unwrap().prerelease);
         // from a list the newest one wins
         let list = serde_json::json!([v.clone(), p]);
-        assert_eq!(pick_release(&list, "0.1.7").unwrap().unwrap().version, "0.1.9");
+        assert_eq!(pick_release(&list, "0.1.7", true).unwrap().unwrap().version, "0.1.9");
         // nightlies: `0.2.0-nightly.<hash>`
         assert!(newer("v0.2.0-nightly.g7c89058f", "0.1.9"));
         assert!(newer("0.2.0-nightly.gaaaaaaaa", "0.2.0-nightly.gbbbbbbbb"));
@@ -983,11 +1002,39 @@ mod tests {
             nightly("aaaaaaaa", "2026-10-01T10:00:00Z"),
             nightly("cccccccc", "2026-10-03T10:00:00Z"),
         ]);
-        let picked = |current: &str| pick_release(&list, current).unwrap().map(|r| r.version);
+        let picked = |current: &str| pick_release(&list, current, true).unwrap().map(|r| r.version);
         assert_eq!(picked("0.1.9").as_deref(), Some("0.2.0-nightly.gdddddddd"));
         assert_eq!(picked("0.2.0-nightly.gaaaaaaaa").as_deref(), Some("0.2.0-nightly.gdddddddd"));
         assert_eq!(picked("0.2.0-nightly.gcccccccc").as_deref(), Some("0.2.0-nightly.gdddddddd"));
         assert_eq!(picked("0.2.0-nightly.gdddddddd"), None);
+    }
+
+    #[test]
+    fn nightlies_are_only_offered_when_asked_for() {
+        let release = |version: &str, prerelease: bool| {
+            serde_json::json!({
+                "tag_name": format!("v{version}"), "prerelease": prerelease,
+                "published_at": "2026-10-01T10:00:00Z",
+                "assets": [{"name": asset_name(version).unwrap(), "browser_download_url": "https://x/f", "size": 1}]
+            })
+        };
+        let list = serde_json::json!([
+            release("0.2.0-nightly.gaaaaaaaa", true),
+            release("0.1.9", false),
+            release("0.2.0-rc.1", true),
+        ]);
+        let picked = |current: &str, nightly: bool| {
+            pick_release(&list, current, nightly).unwrap().map(|r| r.version)
+        };
+        assert_eq!(picked("0.1.8", true).as_deref(), Some("0.2.0-nightly.gaaaaaaaa"));
+        assert_eq!(picked("0.1.8", false).as_deref(), Some("0.2.0-rc.1"));
+        assert_ne!(
+            picked("0.2.0-nightly.gbbbbbbbb", false).as_deref(),
+            Some("0.2.0-nightly.gaaaaaaaa")
+        );
+        assert!(is_nightly("v0.2.0-nightly.g7c89058f"));
+        assert!(!is_nightly("0.2.0-rc.1"));
+        assert!(!is_nightly("0.2.0"));
     }
 
     #[test]

@@ -2454,6 +2454,7 @@ const SETTINGS: &[(&str, &str, &str, Kind)] = &[
     ("vr_desktop_mirror", "vr", "desktop-mirror", Bool),
     ("update_check", "launcher", "update_check", Bool),
     ("update_auto", "launcher", "update_auto", Bool),
+    ("update_nightly", "launcher", "update_nightly", Bool),
 ];
 
 fn toml_num(v: &Toml) -> Option<f64> {
@@ -3682,6 +3683,7 @@ mod tests {
             ("discord_status", json!(false)),
             ("discord_app_id", json!("123456")),
             ("update_auto", json!(true)),
+            ("update_nightly", json!(true)),
             ("camera_collision", json!(false)),
             ("brake_hold", json!(false)),
             ("led_mips", json!(2.5)),

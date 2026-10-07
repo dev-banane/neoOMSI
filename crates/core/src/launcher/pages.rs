@@ -722,7 +722,7 @@ pub fn settings(l: &mut Launcher, area: Rect) {
         h
     });
     if out.check_updates {
-        l.update.check();
+        l.update.check(get(s, "update_nightly").as_bool() == Some(true));
     }
     if out.get_pax_pack {
         l.pax_pack.start();
@@ -2400,6 +2400,14 @@ fn general_tab(
         c.row(),
         "Install updates without asking",
         "update_auto",
+    );
+    toggle_setting(
+        ui,
+        s,
+        dirty,
+        c.row(),
+        "Nightly builds (for testers)",
+        "update_nightly",
     );
     {
         use crate::updater::Status;

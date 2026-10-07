@@ -154,4 +154,5 @@ pub const DEFAULTS: &[(&str, &str, Def)] = &[
     // [launcher]
     ("launcher", "update_check", Def::Bool(true)),
     ("launcher", "update_auto", Def::Bool(false)),
+    ("launcher", "update_nightly", Def::Bool(false)),
 ];
