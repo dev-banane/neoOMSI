@@ -3399,6 +3399,45 @@ pub fn pick_file(title: &str) -> Option<PathBuf> {
     }
 }
 
+pub fn external_launcher(game: &Path) -> Option<PathBuf> {
+    if std::env::var_os("OMSI_BUILTIN_LAUNCHER").is_some() {
+        return None;
+    }
+    if let Some(p) = std::env::var_os("OMSI_LAUNCHER") {
+        return Some(PathBuf::from(p)).filter(|p| p.is_file());
+    }
+    let dir = game.parent()?;
+    let app = if cfg!(target_os = "macos") {
+        dir.parent()?
+            .join("Resources/launcher/neoOMSI Launcher.app/Contents/MacOS/neoOMSI Launcher")
+    } else if cfg!(windows) {
+        dir.join("launcher").join("neoOMSI Launcher.exe")
+    } else {
+        dir.join("launcher").join("neoomsi-launcher-app")
+    };
+    app.is_file().then_some(app)
+}
+
+/// False when there is none: the built-in launcher is the one then.
+pub fn start_external_launcher(game: &Path) -> Result<bool> {
+    let Some(app) = external_launcher(game) else {
+        return Ok(false);
+    };
+    let mut cmd = std::process::Command::new(&app);
+    // Chromium will not start without its sandbox helper, which needs root to be set up:
+    // an unpacked app (not an installed package) never has it
+    if cfg!(target_os = "linux") {
+        cmd.arg("--no-sandbox");
+    }
+    cmd.env("NEOOMSI_ENGINE_PATH", game)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .with_context(|| format!("starting {}", app.display()))?;
+    Ok(true)
+}
+
 /// A phone runs one program: the launcher hands the game's command line over here and the
 /// same process plays it in the same window (see the app's `android.rs`) instead of starting
 /// another process.
@@ -3545,6 +3584,27 @@ mod tests {
         ::legacy_config::remove_content_root(&root);
         let _ = std::fs::remove_dir_all(&root);
         assert_eq!(packs, vec!["Other".to_string()]);
+    }
+
+    #[test]
+    fn the_shipped_launcher_is_found_beside_the_game() {
+        let root = std::env::temp_dir().join(format!("neoomsi-ui-{}", std::process::id()));
+        let (game, app) = if cfg!(target_os = "macos") {
+            let c = root.join("neoOMSI.app/Contents");
+            (
+                c.join("MacOS/neoomsi"),
+                c.join("Resources/launcher/neoOMSI Launcher.app/Contents/MacOS/neoOMSI Launcher"),
+            )
+        } else if cfg!(windows) {
+            (root.join("neoomsi.exe"), root.join("launcher/neoOMSI Launcher.exe"))
+        } else {
+            (root.join("neoomsi"), root.join("launcher/neoomsi-launcher-app"))
+        };
+        assert_eq!(super::external_launcher(&game), None, "none shipped");
+        std::fs::create_dir_all(app.parent().unwrap()).unwrap();
+        std::fs::write(&app, b"").unwrap();
+        assert_eq!(super::external_launcher(&game), Some(app));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

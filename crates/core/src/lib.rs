@@ -76,7 +76,6 @@ mod input_keys;
 mod input_mouse;
 mod input_script;
 mod lan_mods;
-mod launcher_link;
 mod memory;
 mod offscreen;
 mod on_foot;
@@ -111,7 +110,6 @@ use cli::*;
 use duty_start::*;
 use glam::{DVec3, Vec3};
 use input_script::*;
-use launcher_link::*;
 use memory::*;
 use offscreen::*;
 use ::render::{Camera, Renderer, Scene, SurfaceState};
@@ -185,7 +183,10 @@ pub fn run() -> Result<()> {
         return Ok(());
     };
     if args.launcher || (bare && !args.menu) {
-        if legacy_config::env::var_os("OMSI_LAUNCHER").is_some() && open_launcher()? {
+        // (`--launcher` is the built-in one: the external launcher asks for it so)
+        if !args.launcher
+            && omsi_launcher_lib::start_external_launcher(&std::env::current_exe()?)?
+        {
             return Ok(());
         }
         launcher_statics();
