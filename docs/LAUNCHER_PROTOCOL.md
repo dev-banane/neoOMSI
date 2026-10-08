@@ -37,7 +37,7 @@ anything printed goes to stderr with the log. The launcher shows stderr as diagn
 
 1. The launcher sends `handshake` first:
    `{"protocolVersion": "1", "launcherVersion": "0.3.0", "clientPlatform": "win32"}`.
-   Any other request before it is answered with an error.
+   Any other request before it, except `shutdown`, is answered with an error.
 2. The engine answers with:
 
    ```json
@@ -54,8 +54,9 @@ anything printed goes to stderr with the log. The launcher shows stderr as diagn
    `commands` lists everything the engine can answer. The launcher does not send others (for
    example `uninstall_mod`, which only its mock has so far).
 3. Requests run side by side. Their answers come back in any order, matched by `requestId`.
-4. `shutdown` (or closing stdin) ends the engine. Games it started keep running, and the next
-   engine finds them through `~/.neoomsi/instances`.
+4. `shutdown` (or closing stdin) ends the engine once the requests still running are answered
+   (10 s at most). Games it started keep running, and the next engine finds them through
+   `~/.neoomsi/instances`.
 
 ## Commands
 
@@ -78,11 +79,10 @@ serialises them.
 | `settings`, `save_settings`, `option_presets` | changed keys | saving `pax_models: "realistic"` downloads the pack when it is missing |
 | `pax_pack`, `install_pax_pack` | – | the realistic passengers' pack: `{state, done, total, message, installed, latest}`; `latest` (`{version, notes, page, published}`) is the newest `realistic-pax-v<n>` release, looked for every 6 hours, and makes an older pack `outdated` |
 | `update_check` | – | the newest neoOMSI release for this build's channel and platform (`{version, page, notes, prerelease, size}`), or `null` |
-| `keybindings`, `save_keybindings`, `controllers`, `save_controllers` | the whole list | |
+| `keybindings`, `save_keybindings`, `controllers`, `save_controllers` | the whole list | `controllers` reads the devices as they are now (the first call waits half a second for them to be found) |
 | `preview` | `{bus, paint}` | the path of a `.glb` file |
 | `situations` | `{map}` | |
 | `tutorials`, `servers`, `save_servers`, `version` | | `servers` asks every server for its status |
-| `open_game_launcher` | `{page?}` | the built-in launcher, e.g. `controls:1` for calibration |
 
 ## Events
 
@@ -92,7 +92,7 @@ serialises them.
 | `installs_changed` | `InstallProgress[]` | an install moved on (every 250 ms while one runs) |
 | `content_changed` | `{stamp}` | maps, buses or weather were added or removed: lists the launcher holds are stale |
 | `session_event` | `{sessionId, pid, state, message, progress?, exitCode?}` | a game moved to another state |
-| `pax_pack_changed` | `{state, done, total, message}` | the realistic passengers' download or install moved on |
+| `pax_pack_changed` | as `pax_pack` answers | the realistic passengers' download or install moved on, or a newer release was found |
 
 `state` counts `1` starting, `2` loading, `3` running, `4` stopping, `5` exited, `6` failed.
 `sessionId` is the instance id. A game ends as *failed* when it reported a failure, or when it

@@ -3,16 +3,23 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
 use std::hash::{BuildHasher, Hasher};
+use std::io::Read;
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub const ENV_ADDR: &str = "OMSI_CONTROL";
 pub const ENV_TOKEN: &str = "OMSI_CONTROL_TOKEN";
 
+/// Before the token is checked, any local program can connect.
+const HELLO_MAX: usize = 4096;
+const HELLO_WITHIN: Duration = Duration::from_secs(5);
+const UNANSWERED_MAX: usize = 16;
+static UNANSWERED: AtomicUsize = AtomicUsize::new(0);
+
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct GameState {
-    /// starting, loading, running, stopping or failed
     pub state: String,
     #[serde(default)]
     pub progress: Option<f32>,
@@ -80,25 +87,57 @@ pub fn listen(changed: impl Fn(&str) + Send + Sync + 'static) -> std::io::Result
         .name("game link".into())
         .spawn(move || {
             let mut next = 0u64;
-            for stream in listener.incoming().flatten() {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else {
+                    std::thread::sleep(Duration::from_millis(100));
+                    continue;
+                };
+                if UNANSWERED.load(Ordering::SeqCst) >= UNANSWERED_MAX {
+                    continue;
+                }
+                UNANSWERED.fetch_add(1, Ordering::SeqCst);
                 next += 1;
                 let conn = next;
-                let _ = std::thread::Builder::new()
+                let spawned = std::thread::Builder::new()
                     .name("game link conn".into())
                     .spawn(move || serve(stream, conn));
+                if spawned.is_err() {
+                    UNANSWERED.fetch_sub(1, Ordering::SeqCst);
+                }
             }
         })?;
     Ok(addr)
 }
 
-fn serve(mut stream: TcpStream, conn: u64) {
+struct Within<'a>(&'a TcpStream, Instant);
+
+impl Read for Within<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let left = self.1.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(std::io::ErrorKind::TimedOut.into());
+        }
+        self.0.set_read_timeout(Some(left))?;
+        (&mut &*self.0).read(buf)
+    }
+}
+
+fn same(a: &str, b: &str) -> bool {
+    a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0, |d, (x, y)| d | (x ^ y)) == 0
+}
+
+fn serve(stream: TcpStream, conn: u64) {
+    let hello = protocol::read_frame_max(&mut Within(&stream, Instant::now() + HELLO_WITHIN), HELLO_MAX);
+    UNANSWERED.fetch_sub(1, Ordering::SeqCst);
+    let Ok(Some(hello)) = hello else { return };
+    if hello.kind == "hello" {
+        welcome(stream, conn, hello);
+    }
+}
+
+fn welcome(mut stream: TcpStream, conn: u64, hello: Message) {
     let Some(link) = LINK.get() else { return };
     let _ = stream.set_nodelay(true);
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
-    let hello = match protocol::read_frame(&mut stream) {
-        Ok(Some(m)) if m.kind == "hello" => m,
-        _ => return,
-    };
     let token = hello.payload.get("token").and_then(|v| v.as_str());
     let id = hello
         .payload
@@ -106,7 +145,7 @@ fn serve(mut stream: TcpStream, conn: u64) {
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    if token != Some(link.token.as_str()) || !valid_instance(&id) {
+    if !token.is_some_and(|t| same(t, &link.token)) || !valid_instance(&id) {
         let _ = protocol::write_frame(
             &mut stream,
             &Message::new("refused", json!({ "reason": "unknown game" })),

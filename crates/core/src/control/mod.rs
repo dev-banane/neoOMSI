@@ -1,19 +1,22 @@
 mod commands;
 mod minimap;
+mod pads;
 
 use omsi_launcher_lib::protocol::{self, Message};
 use omsi_launcher_lib::{Instance, link};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const QUIET: Duration = Duration::from_millis(1000);
 const PAX_RELEASES_EVERY: Duration = Duration::from_secs(6 * 3600);
 const INSTALLING: Duration = Duration::from_millis(250);
+/// A `launch` cut off between spawning the game and writing its file would lose the game.
+const FINISH_REQUESTS: Duration = Duration::from_secs(10);
 
 #[derive(Clone)]
 pub(crate) struct Server(Arc<Inner>);
@@ -22,6 +25,7 @@ struct Inner {
     out: Mutex<Box<dyn Write + Send>>,
     ready: AtomicBool,
     stop: AtomicBool,
+    busy: AtomicUsize,
     wake: Mutex<Sender<()>>,
     game_link: AtomicBool,
 }
@@ -60,7 +64,8 @@ fn take_stdout() -> std::io::Result<std::fs::File> {
     use std::os::fd::FromRawFd;
     let _ = std::io::stdout().flush();
     unsafe {
-        let fd = libc::dup(1);
+        // (close-on-exec: a game holding it open would hide the engine's end from the launcher)
+        let fd = libc::fcntl(1, libc::F_DUPFD_CLOEXEC, 3);
         if fd < 0 || libc::dup2(2, 1) < 0 {
             return Err(std::io::Error::last_os_error());
         }
@@ -74,15 +79,24 @@ fn take_stdout() -> std::io::Result<std::fs::File> {
     unsafe extern "system" {
         fn GetStdHandle(which: u32) -> isize;
         fn SetStdHandle(which: u32, handle: isize) -> i32;
+        fn SetHandleInformation(handle: isize, mask: u32, flags: u32) -> i32;
     }
+    const STD_INPUT: u32 = -10i32 as u32;
     const STD_OUTPUT: u32 = -11i32 as u32;
     const STD_ERROR: u32 = -12i32 as u32;
+    const HANDLE_FLAG_INHERIT: u32 = 1;
     let _ = std::io::stdout().flush();
     // SAFETY: our own standard handles; std looks stdout up on every write, so it follows
     unsafe {
         let out = GetStdHandle(STD_OUTPUT);
         if out == 0 || out == -1 {
             return Err(std::io::Error::other("no standard output to answer on"));
+        }
+        // the launcher's pipes, inherited by every game, would outlive the engine
+        for h in [GetStdHandle(STD_INPUT), out, GetStdHandle(STD_ERROR)] {
+            if h != 0 && h != -1 {
+                SetHandleInformation(h, HANDLE_FLAG_INHERIT, 0);
+            }
         }
         SetStdHandle(STD_OUTPUT, GetStdHandle(STD_ERROR));
         Ok(std::fs::File::from_raw_handle(out as *mut std::ffi::c_void))
@@ -96,6 +110,7 @@ impl Server {
             out: Mutex::new(out),
             ready: AtomicBool::new(false),
             stop: AtomicBool::new(false),
+            busy: AtomicUsize::new(0),
             wake: Mutex::new(tx),
             game_link: AtomicBool::new(false),
         }));
@@ -107,8 +122,23 @@ impl Server {
     }
 
     fn send(&self, m: &Message) {
+        let frame = match protocol::encode(m) {
+            Ok(f) => f,
+            Err(e) => {
+                log::warn!("launcher protocol: {} not sent: {e}", m.kind);
+                if m.request_id.is_some() && m.error.is_none() {
+                    self.send(&Message {
+                        kind: m.kind.clone(),
+                        request_id: m.request_id.clone(),
+                        payload: Value::Null,
+                        error: Some(format!("the answer could not be sent: {e}")),
+                    });
+                }
+                return;
+            }
+        };
         let mut out = self.0.out.lock().unwrap_or_else(|e| e.into_inner());
-        if let Err(e) = protocol::write_frame(&mut *out, m) {
+        if let Err(e) = out.write_all(&frame).and_then(|()| out.flush()) {
             log::warn!("launcher protocol: {} not sent: {e}", m.kind);
             self.0.stop.store(true, Ordering::SeqCst);
         }
@@ -137,16 +167,22 @@ impl Server {
                 _ if !self.0.ready.load(Ordering::SeqCst) => {
                     self.send(&m.reply(Err("the handshake has to come first".into())));
                 }
+                kind if !commands::COMMANDS.contains(&kind) => {
+                    self.send(&m.reply(Err(format!("this engine has no command {kind:?}"))));
+                }
                 _ => {
                     let this = self.clone();
+                    self.0.busy.fetch_add(1, Ordering::SeqCst);
                     let spawned = std::thread::Builder::new()
-                        .name(format!("request {}", m.kind))
+                        .name("launcher request".into())
                         .spawn(move || {
                             let r = commands::call(&m.kind, &m.payload).map_err(|e| format!("{e:#}"));
                             this.send(&m.reply(r));
+                            this.0.busy.fetch_sub(1, Ordering::SeqCst);
                             this.wake();
                         });
                     if let Err(e) = spawned {
+                        self.0.busy.fetch_sub(1, Ordering::SeqCst);
                         log::error!("launcher protocol: no thread for a request: {e}");
                     }
                 }
@@ -154,6 +190,10 @@ impl Server {
             if self.0.stop.load(Ordering::SeqCst) {
                 break;
             }
+        }
+        let until = Instant::now() + FINISH_REQUESTS;
+        while self.0.busy.load(Ordering::SeqCst) > 0 && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(20));
         }
         self.0.stop.store(true, Ordering::SeqCst);
         self.wake();
@@ -163,6 +203,7 @@ impl Server {
         let theirs = p.get("protocolVersion").and_then(|v| v.as_str()).unwrap_or("");
         let engine = crate::startup::VERSION;
         if theirs.split('.').next() != Some(protocol::VERSION) {
+            self.0.ready.store(false, Ordering::SeqCst);
             return Ok(json!({
                 "status": {
                     "code": 2,
@@ -474,6 +515,20 @@ mod tests {
         let by = |id: &str| got.iter().find(|m| m.request_id.as_deref() == Some(id)).unwrap();
         assert_eq!(by("1").payload["protocol"], 1);
         assert!(by("2").error.as_deref().unwrap().contains("teleport"));
+    }
+
+    #[test]
+    fn a_bad_request_type_is_answered_and_the_engine_goes_on() {
+        let out = Shared::default();
+        let (server, _woken) = Server::new(Box::new(out.clone()));
+        server.0.ready.store(true, Ordering::SeqCst);
+        server.serve(std::io::Cursor::new(frames(&[
+            request("a\u{0}b", "1", json!({})),
+            request("version", "2", json!({})),
+        ])));
+        let got = answers(&out);
+        assert!(got[0].error.as_deref().unwrap().contains("no command"));
+        assert_eq!(got[1].payload["protocol"], 1, "answered before the engine ended");
     }
 
     fn game(id: &str, running: bool) -> Instance {

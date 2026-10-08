@@ -78,6 +78,8 @@ pub(crate) fn report(state: &str, progress: Option<f32>, message: &str) {
         json!({ "state": state, "progress": progress, "message": message, "window": c.window }),
     );
     if protocol::write_frame(&mut c.stream, &m).is_err() {
+        // half a frame may be out: the engine must see the link end, not wait for the rest
+        let _ = c.stream.shutdown(std::net::Shutdown::Both);
         *conn = None;
         return;
     }
@@ -94,6 +96,11 @@ pub(crate) fn window_shown(window: &winit::window::Window) {
     };
     window.focus_window();
     report(&state, None, "");
+}
+
+/// A game this one starts in its place would report as this one.
+pub(crate) fn unlinked(cmd: &mut std::process::Command) -> &mut std::process::Command {
+    cmd.env_remove(ENV_ADDR).env_remove(ENV_TOKEN).env_remove("OMSI_INSTANCE")
 }
 
 pub(crate) fn failed(message: &str) {

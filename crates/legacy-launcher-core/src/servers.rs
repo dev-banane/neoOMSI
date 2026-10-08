@@ -7,7 +7,6 @@ pub struct ServerEntry {
     pub address: String,
 }
 
-/// The official server first when the list does not have it.
 pub fn with_official(mut list: Vec<ServerEntry>) -> Vec<ServerEntry> {
     if !list
         .iter()
@@ -37,8 +36,12 @@ pub fn load() -> Vec<ServerEntry> {
     )
 }
 
+/// The game's own launcher reads it too: never half written.
 pub fn store(servers: &[ServerEntry]) -> std::io::Result<()> {
-    std::fs::write(path(), serde_json::to_vec_pretty(servers).unwrap_or_default())
+    let p = path();
+    let tmp = p.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_vec_pretty(servers).unwrap_or_default())?;
+    std::fs::rename(&tmp, &p)
 }
 
 #[cfg(test)]

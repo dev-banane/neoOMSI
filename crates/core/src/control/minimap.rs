@@ -7,6 +7,7 @@ use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 const DEFAULT_DATE: &str = "1989-05-30";
 /// The navigator samples every 3 m: unsimplified, a big map is tens of MB.
@@ -14,25 +15,40 @@ const TOLERANCE: f32 = 0.75;
 const BEFORE_STOP: f64 = 12.0;
 const KEPT: usize = 4;
 
-/// One at a time: opening a map sets the tile size for the whole process.
 static BUILT: Mutex<Vec<(String, Value)>> = Mutex::new(Vec::new());
+/// One at a time: opening a map sets the tile size for the whole process.
+static BUILDING: Mutex<()> = Mutex::new(());
+static GENERATION: AtomicU64 = AtomicU64::new(0);
 
 pub(super) fn forget() {
+    GENERATION.fetch_add(1, Ordering::SeqCst);
     BUILT.lock().unwrap_or_else(|e| e.into_inner()).clear();
+}
+
+fn kept(key: &str) -> Option<Value> {
+    let built = BUILT.lock().unwrap_or_else(|e| e.into_inner());
+    built.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone())
 }
 
 pub(super) fn minimap(map: &str, date: &str) -> Result<Value> {
     let date = if date.trim().is_empty() { DEFAULT_DATE } else { date.trim() };
     let key = format!("{map}|{date}");
-    let mut built = BUILT.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some((_, v)) = built.iter().find(|(k, _)| *k == key) {
-        return Ok(v.clone());
+    if let Some(v) = kept(&key) {
+        return Ok(v);
     }
+    let _one = BUILDING.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(v) = kept(&key) {
+        return Ok(v);
+    }
+    let generation = GENERATION.load(Ordering::SeqCst);
     let v = build(map, date)?;
-    if built.len() >= KEPT {
-        built.remove(0);
+    let mut built = BUILT.lock().unwrap_or_else(|e| e.into_inner());
+    if generation == GENERATION.load(Ordering::SeqCst) {
+        if built.len() >= KEPT {
+            built.remove(0);
+        }
+        built.push((key, v.clone()));
     }
-    built.push((key, v.clone()));
     Ok(v)
 }
 
@@ -47,6 +63,7 @@ fn spawn(p: DVec3, heading: f64) -> String {
 fn build(map: &str, date: &str) -> Result<Value> {
     let t0 = std::time::Instant::now();
     let root = PathBuf::from(lib::load_config().root);
+    // registers the content folder's roots with the OMSI readers
     let _ = lib::content_dir();
     let cfg = ::legacy_config::resolve_path(&root, map);
     let code = ::map::date_code(date).with_context(|| format!("'{date}' is not a date (YYYY-MM-DD)"))?;

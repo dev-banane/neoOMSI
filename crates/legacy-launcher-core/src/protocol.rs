@@ -62,6 +62,10 @@ pub fn write_frame(w: &mut impl Write, m: &Message) -> io::Result<()> {
 
 /// `Ok(None)`: the other side closed the stream.
 pub fn read_frame(r: &mut impl Read) -> io::Result<Option<Message>> {
+    read_frame_max(r, MAX_FRAME)
+}
+
+pub fn read_frame_max(r: &mut impl Read, max: usize) -> io::Result<Option<Message>> {
     let mut len = [0u8; 4];
     match r.read_exact(&mut len) {
         Ok(()) => {}
@@ -69,10 +73,10 @@ pub fn read_frame(r: &mut impl Read) -> io::Result<Option<Message>> {
         Err(e) => return Err(e),
     }
     let len = u32::from_be_bytes(len) as usize;
-    if len > MAX_FRAME {
+    if len > max {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("a frame of {len} bytes is over the limit of {MAX_FRAME}"),
+            format!("a frame of {len} bytes is over the limit of {max}"),
         ));
     }
     let mut data = vec![0u8; len];

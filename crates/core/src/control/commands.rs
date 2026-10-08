@@ -5,7 +5,7 @@ use omsi_launcher_lib as lib;
 use omsi_launcher_lib::servers::{self, ServerEntry};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 pub(super) const COMMANDS: &[&str] = &[
@@ -48,7 +48,6 @@ pub(super) const COMMANDS: &[&str] = &[
     "servers",
     "save_servers",
     "version",
-    "open_game_launcher",
 ];
 
 type Slot = Arc<Mutex<Option<Value>>>;
@@ -78,6 +77,7 @@ fn cached(name: &'static str, read: impl FnOnce() -> Result<Value>) -> Result<Va
 }
 
 static SETTINGS_FILE: Mutex<()> = Mutex::new(());
+static CONFIG_FILE: Mutex<()> = Mutex::new(());
 
 fn settings_file() -> std::sync::MutexGuard<'static, ()> {
     SETTINGS_FILE.lock().unwrap_or_else(|e| e.into_inner())
@@ -99,6 +99,7 @@ fn save_settings_with(
 
 pub(super) fn forget_content() {
     LISTS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    *CONTENT.lock().unwrap_or_else(|e| e.into_inner()) = None;
     super::minimap::forget();
 }
 
@@ -108,14 +109,18 @@ pub(super) fn call(cmd: &str, a: &Value) -> Result<Value> {
     Ok(match cmd {
         "config" => serde_json::to_value(lib::load_config())?,
         "save_config" => {
+            let _file = CONFIG_FILE.lock().unwrap_or_else(|e| e.into_inner());
             let mut c = lib::load_config();
+            let before = (c.root.clone(), c.game.clone());
             for (key, field) in [("root", &mut c.root), ("game", &mut c.game), ("profile", &mut c.profile)] {
                 if let Some(v) = a.get(key).and_then(|v| v.as_str()) {
                     *field = v.to_string();
                 }
             }
             lib::save_config(&c)?;
-            forget_content();
+            if (c.root.clone(), c.game.clone()) != before {
+                forget_content();
+            }
             serde_json::to_value(lib::load_config())?
         }
         "maps" => cached("maps", || Ok(serde_json::to_value(lib::list_maps()?)?))?,
@@ -170,7 +175,11 @@ pub(super) fn call(cmd: &str, a: &Value) -> Result<Value> {
                 },
                 lib::save_settings,
             )?;
-            if saved["pax_models"] == "realistic" {
+            // content names come in the settings' language
+            if a.get("language").is_some() {
+                forget_content();
+            }
+            if a.get("pax_models").and_then(|v| v.as_str()) == Some("realistic") {
                 with_pax(|p| {
                     if matches!(p.status(), PaxStatus::Missing | PaxStatus::Outdated) {
                         p.start();
@@ -245,35 +254,36 @@ pub(super) fn call(cmd: &str, a: &Value) -> Result<Value> {
             json!({})
         }
         "version" => json!({ "version": crate::startup::VERSION, "protocol": lib::protocol::VERSION.parse::<u32>().unwrap_or(0) }),
-        "open_game_launcher" => {
-            let mut cmd = std::process::Command::new(std::env::current_exe()?);
-            cmd.arg("--launcher")
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null());
-            if let Some(page) = a.get("page").and_then(|v| v.as_str()) {
-                cmd.args(["--launcher-page", page]);
-            }
-            json!({ "pid": cmd.spawn()?.id() })
-        }
         _ => return Err(anyhow!("this engine has no command {cmd:?}")),
     })
 }
 
 static PAX: Mutex<Option<PaxPack>> = Mutex::new(None);
+/// The game's content folder, as `launch` starts it: looking it up writes a probe file.
+static CONTENT: Mutex<Option<Option<PathBuf>>> = Mutex::new(None);
 
-/// Looked at afresh while idle: the built-in launcher may have installed it meanwhile.
+fn content() -> Option<PathBuf> {
+    CONTENT
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_or_insert_with(lib::content_dir)
+        .clone()
+}
+
 fn with_pax<T>(f: impl FnOnce(&mut PaxPack) -> T) -> T {
     let mut pax = PAX.lock().unwrap_or_else(|e| e.into_inner());
-    let busy = pax.as_ref().is_some_and(|p| {
-        matches!(
-            p.status(),
-            PaxStatus::Downloading { .. } | PaxStatus::Installing | PaxStatus::Failed(_)
-        )
-    });
-    if !busy {
-        *pax = Some(PaxPack::new(crate::startup::content_dir()));
-    }
-    f(pax.get_or_insert_with(|| PaxPack::new(crate::startup::content_dir())))
+    let p = match pax.take() {
+        Some(p)
+            if matches!(
+                p.status(),
+                PaxStatus::Downloading { .. } | PaxStatus::Installing | PaxStatus::Failed(_)
+            ) =>
+        {
+            p
+        }
+        _ => PaxPack::new(content()),
+    };
+    f(pax.insert(p))
 }
 
 pub(super) fn pax_status() -> Value {
@@ -285,9 +295,7 @@ pub(super) fn pax_status() -> Value {
         PaxStatus::Installed => ("installed", 0, 0, String::new()),
         PaxStatus::Failed(e) => ("failed", 0, 0, e),
     };
-    let installed = crate::startup::content_dir()
-        .as_deref()
-        .and_then(crate::pax_pack::installed_version);
+    let installed = content().as_deref().and_then(crate::pax_pack::installed_version);
     let latest = crate::pax_pack::latest().map(|r| {
         json!({ "version": r.version, "notes": r.notes, "page": r.page, "published": r.published })
     });
@@ -405,7 +413,7 @@ fn controller_json(d: &DeviceCfg, live: Option<&controllers::Connected>) -> Valu
         "name": d.name,
         "connected": live.is_some(),
         "enabled": d.enabled,
-        "deadzone": d.deadzone.unwrap_or(0.0),
+        "deadzone": d.deadzone.unwrap_or_else(controllers::global_deadzone),
         "force_feedback": d.ff_scale.is_none_or(|(steer, _)| steer > 0.0),
         "axes": axes,
         "buttons": d.buttons,
@@ -413,7 +421,7 @@ fn controller_json(d: &DeviceCfg, live: Option<&controllers::Connected>) -> Valu
 }
 
 fn controllers_now() -> Value {
-    let connected = controllers::Devices::new(None, false).connected();
+    let connected = super::pads::connected();
     let configured = controllers::read_cfg();
     let live = |name: &str| {
         connected
@@ -468,7 +476,14 @@ fn yes() -> bool {
 /// Keeps what the page does not show: calibration, other axis flags, vibration strength.
 fn apply(d: &mut DeviceCfg, c: &ControllerIn) {
     d.enabled = c.enabled;
-    d.deadzone = (c.deadzone > 0.0).then(|| c.deadzone.clamp(0.0, 0.3));
+    let deadzone = c.deadzone.clamp(0.0, 0.3);
+    // a calibrated axis's own dead zone would outrank the new one
+    if (deadzone - d.deadzone.unwrap_or_else(controllers::global_deadzone)).abs() > 1e-4 {
+        d.deadzone = Some(deadzone);
+        for cal in d.calibration.iter_mut().flatten() {
+            cal.deadzone = None;
+        }
+    }
     for (k, axis) in c.axes.iter().take(8).enumerate() {
         d.axes[k] = FUNCTIONS
             .iter()
@@ -537,6 +552,28 @@ mod tests {
         changed.force_feedback = true;
         apply(&mut back, &changed);
         assert_eq!(back.ff_scale, Some((1.0, 0.4)));
+    }
+
+    #[test]
+    fn a_new_dead_zone_replaces_the_calibrated_ones() {
+        let mut d = DeviceCfg {
+            name: "G29".into(),
+            deadzone: Some(0.05),
+            ..Default::default()
+        };
+        d.calibration[0] = Some(controllers::AxisCal {
+            min: -1.0,
+            centre: Some(0.0),
+            max: 1.0,
+            deadzone: Some(0.2),
+        });
+        let mut changed: ControllerIn = serde_json::from_value(controller_json(&d, None)).unwrap();
+        apply(&mut d, &changed);
+        assert_eq!(d.deadzone(0), 0.2, "an unchanged dead zone keeps the calibration's");
+        changed.deadzone = 0.1;
+        apply(&mut d, &changed);
+        assert_eq!(d.deadzone(0), 0.1);
+        assert_eq!(d.calibration[0].unwrap().deadzone, None);
     }
 
     #[test]

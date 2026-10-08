@@ -1133,7 +1133,6 @@ impl Ui {
         *value != before
     }
 
-    /// Hours and minutes with arrows (and the wheel over either).
     /// Hours and minutes, each typed in (as in OMSI: `1643`, `7:05`) or stepped with the
     /// arrows and the wheel.
     pub fn time_field(&mut self, name: &str, r: Rect, minutes: &mut i32) -> bool {
@@ -1199,7 +1198,7 @@ impl Ui {
             }
             self.focus = cell.map(|k| ids[k]);
         }
-        for (k, (unit, step)) in [(60, 60), (1, 1)].iter().enumerate() {
+        for (k, (unit, step)) in [(60, 60), (1, 5)].iter().enumerate() {
             let cell_r = cells[k];
             let id = ids[k];
             let focused = self.focus == Some(id);

@@ -79,6 +79,7 @@ mod lan_mods;
 mod memory;
 mod offscreen;
 mod on_foot;
+mod pax_pack;
 mod player;
 mod plugins;
 mod route_arrows;
@@ -162,7 +163,10 @@ pub fn run() -> Result<()> {
                 std::backtrace::Backtrace::force_capture()
             ),
         );
-        game_link::failed(&format!("the game stopped on an error: {info}"));
+        // (other threads' panics are often caught: a damaged tile, a plugin)
+        if std::thread::current().name() == Some("main") {
+            game_link::failed(&format!("the game stopped on an error: {info}"));
+        }
         default_hook(info);
     }));
     if let Err(e) = config::init(config::default_path()) {
@@ -183,14 +187,16 @@ pub fn run() -> Result<()> {
         return Ok(());
     };
     if args.launcher || (bare && !args.menu) {
-        // (`--launcher` is the built-in one: the external launcher asks for it so)
-        if !args.launcher
-            && omsi_launcher_lib::start_external_launcher(&std::env::current_exe()?)?
-        {
-            return Ok(());
+        // `--launcher` always means the built-in one
+        if !args.launcher {
+            match omsi_launcher_lib::start_external_launcher(&std::env::current_exe()?) {
+                Ok(true) => return Ok(()),
+                Ok(false) => {}
+                Err(e) => log::warn!("{e:#}: the built-in launcher opens instead"),
+            }
         }
         launcher_statics();
-        return launcher::run(graphics_instance(), args.launcher_page.as_deref());
+        return launcher::run(graphics_instance());
     }
     if server_cfg.is_none() {
         game_link::connect();

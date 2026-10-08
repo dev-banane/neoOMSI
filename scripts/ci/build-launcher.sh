@@ -47,7 +47,10 @@ case "$platform" in
     rm -rf "$dest"
     mkdir -p "$dest"
     ditto "$(ls -d "$out"/mac*/"neoOMSI Launcher.app")" "$dest/neoOMSI Launcher.app"
+    # --deep does not reach into Resources: the nested app needs its own signature first
+    codesign --force --deep --sign - "$dest/neoOMSI Launcher.app"
     codesign --force --deep --sign - "$app"
+    codesign --verify --deep --strict "$app"
     ;;
   *)
     dest="dist/$platform/launcher"

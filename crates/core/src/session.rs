@@ -52,6 +52,7 @@ impl App {
             return false;
         };
         let mut cmd = std::process::Command::new(exe);
+        crate::game_link::unlinked(&mut cmd);
         cmd.arg("--root")
             .arg(&self.args.root)
             .arg("--no-menu")
@@ -121,6 +122,7 @@ impl App {
             return false;
         };
         let mut cmd = std::process::Command::new(exe);
+        crate::game_link::unlinked(&mut cmd);
         cmd.arg("--root")
             .arg(&self.args.root)
             .arg("--no-menu")

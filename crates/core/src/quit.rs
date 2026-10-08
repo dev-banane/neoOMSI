@@ -4,7 +4,8 @@
 //! LAN peers only noticed the player was gone when he timed out. Here the signal only
 //! marks the request; a watcher thread wakes the event loop, which then ends the session
 //! the way Escape and closing the window do (summary, personnel file, LAN goodbye). A
-//! second signal ends the process at once, for a game that does not react.
+//! second signal ends the process at once, for a game that does not react. The launcher's
+//! quit over the game link (`request`) takes the same way, on every platform.
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -115,10 +116,6 @@ pub fn install(wake: impl FnOnce(i32) + Send + 'static) {
             }
         }
     }
-    #[cfg(not(unix))]
-    {
-        // Windows without the game link: taskkill's WM_CLOSE arrives as a window close
-    }
 }
 
 pub fn request() {
@@ -154,6 +151,7 @@ mod tests {
             rx.recv_timeout(std::time::Duration::from_millis(200)).is_err(),
             "woken once"
         );
+        REQUESTED.store(0, Ordering::SeqCst);
     }
 }
 

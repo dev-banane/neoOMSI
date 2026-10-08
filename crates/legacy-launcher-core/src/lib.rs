@@ -2372,6 +2372,7 @@ const SETTINGS: &[(&str, &str, &str, Kind)] = &[
     ("nightmap_glow", "graphics", "nightmap_glow", Int(0, 15)),
     ("led_mips", "graphics", "led_mips", Float(0.0, 4.0)),
     ("atmosphere_brightness", "graphics", "atmosphere_brightness", Float(0.0, 2.0)),
+    ("map_detail", "graphics", "map_detail", Int(-1, 255)),
     ("navigator", "ui", "navigator", Bool),
     ("ui_opacity", "ui", "opacity", Float(0.0, 1.0)),
     ("navigator_corner", "ui", "navigator_corner", Text),
@@ -2400,6 +2401,8 @@ const SETTINGS: &[(&str, &str, &str, Kind)] = &[
     ("metar_station", "gameplay", "metar_station", Station),
     ("auto_clutch", "gameplay", "auto_clutch", Bool),
     ("auto_ibis", "gameplay", "auto_ibis", Bool),
+    ("momentary_gears", "gameplay", "momentary_gears", Bool),
+    ("auto_shift", "gameplay", "auto_shift", Bool),
     ("steering_linear", "controls", "steering_linear", Bool),
     ("old_steering", "controls", "old_steering", Bool),
     ("red_steer_spd", "controls", "red_steer_spd", Bool),
@@ -2627,7 +2630,10 @@ fn mirror_refresh(x: &str) -> &'static str {
 /// it teaches, in the settings' language.
 pub fn tutorials() -> Vec<(usize, String, String)> {
     let Ok(r) = root() else { return Vec::new() };
-    let lang = content_language();
+    tutorials_in(&r, content_language())
+}
+
+fn tutorials_in(r: &Path, lang: &str) -> Vec<(usize, String, String)> {
     let mut out = Vec::new();
     for n in 1..=4usize {
         let p = [lang, "en", "de"]
@@ -3404,19 +3410,31 @@ pub fn external_launcher(game: &Path) -> Option<PathBuf> {
     if std::env::var_os("OMSI_BUILTIN_LAUNCHER").is_some() {
         return None;
     }
-    if let Some(p) = std::env::var_os("OMSI_LAUNCHER") {
-        return Some(PathBuf::from(p)).filter(|p| p.is_file());
-    }
+    let app = match std::env::var_os("OMSI_LAUNCHER") {
+        Some(p) => PathBuf::from(p),
+        None => shipped_launcher(game)?,
+    };
+    let current = std::env::current_exe().ok();
+    (app.is_file() && !same_file(&app, game) && !current.is_some_and(|c| same_file(&app, &c)))
+        .then_some(app)
+}
+
+/// An old `OMSI_LAUNCHER` may point back at this program or the game: they would start
+/// each other without end.
+fn same_file(a: &Path, b: &Path) -> bool {
+    std::fs::canonicalize(a).ok().is_some_and(|a| std::fs::canonicalize(b).ok() == Some(a))
+}
+
+fn shipped_launcher(game: &Path) -> Option<PathBuf> {
     let dir = game.parent()?;
-    let app = if cfg!(target_os = "macos") {
+    Some(if cfg!(target_os = "macos") {
         dir.parent()?
             .join("Resources/launcher/neoOMSI Launcher.app/Contents/MacOS/neoOMSI Launcher")
     } else if cfg!(windows) {
         dir.join("launcher").join("neoOMSI Launcher.exe")
     } else {
         dir.join("launcher").join("neoomsi-launcher-app")
-    };
-    app.is_file().then_some(app)
+    })
 }
 
 /// False when there is none: the built-in launcher is the one then.
@@ -3656,22 +3674,42 @@ mod tests {
         } else {
             (root.join("neoomsi"), root.join("launcher/neoomsi-launcher-app"))
         };
-        assert_eq!(super::external_launcher(&game), None, "none shipped");
-        std::fs::create_dir_all(app.parent().unwrap()).unwrap();
-        std::fs::write(&app, b"").unwrap();
-        assert_eq!(super::external_launcher(&game), Some(app));
+        assert_eq!(super::shipped_launcher(&game).as_deref(), Some(app.as_path()));
+        let overridden = ["OMSI_LAUNCHER", "OMSI_BUILTIN_LAUNCHER"]
+            .iter()
+            .any(|k| std::env::var_os(k).is_some());
+        if !overridden {
+            assert_eq!(super::external_launcher(&game), None, "none shipped");
+            std::fs::create_dir_all(app.parent().unwrap()).unwrap();
+            std::fs::write(&app, b"").unwrap();
+            assert_eq!(super::external_launcher(&game), Some(app.clone()));
+        }
+        std::fs::create_dir_all(game.parent().unwrap()).unwrap();
+        std::fs::write(&game, b"").unwrap();
+        let dir = game.parent().unwrap();
+        assert!(super::same_file(&game, &dir.join(".").join(game.file_name().unwrap())));
+        assert!(!super::same_file(&game, &app));
         let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
     fn tutorials_are_found_by_omsis_language_suffix() {
-        let root = std::path::Path::new("../../../OMSI 2 Original");
-        if !root.join("Tutorials/menu_1_ENG.html").is_file() {
-            return;
-        }
+        let root = std::env::temp_dir().join(format!("omsi-tutorials-{}", std::process::id()));
         let dir = root.join("Tutorials");
-        assert!(dir.join(format!("menu_1_{}.html", super::omsi_suffix("en"))).is_file());
-        assert!(dir.join(format!("menu_1_{}.html", super::omsi_suffix("de"))).is_file());
+        std::fs::create_dir_all(&dir).unwrap();
+        let page = |title: &str| format!("<style></style><h2>{title}</h2><p>Text</p>");
+        std::fs::write(dir.join("menu_1_ENG.html"), page("Driving")).unwrap();
+        std::fs::write(dir.join("menu_1_DEU.html"), page("Fahren")).unwrap();
+        std::fs::write(dir.join("menu_2_DEU.html"), page("Tickets")).unwrap();
+        let titles = |lang| {
+            super::tutorials_in(&root, lang)
+                .into_iter()
+                .map(|(n, title, _)| (n, title))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(titles("en"), [(1, "Driving".into()), (2, "Tickets".into())]);
+        assert_eq!(titles("de"), [(1, "Fahren".to_string()), (2, "Tickets".into())]);
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

@@ -1,5 +1,4 @@
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// The oldest pack this game reads.
@@ -105,7 +104,6 @@ fn manifest(dir: &Path) -> Option<serde_json::Value> {
 pub struct PaxPack {
     content: Option<PathBuf>,
     status: Arc<Mutex<Status>>,
-    finished: Arc<AtomicBool>,
 }
 
 fn lock(s: &Mutex<Status>) -> std::sync::MutexGuard<'_, Status> {
@@ -118,7 +116,6 @@ impl PaxPack {
         PaxPack {
             content,
             status: Arc::new(Mutex::new(status)),
-            finished: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -139,7 +136,7 @@ impl PaxPack {
             return;
         };
         *lock(&self.status) = Status::Downloading { done: 0, total: 0 };
-        let (status, finished) = (self.status.clone(), self.finished.clone());
+        let status = self.status.clone();
         std::thread::spawn(move || match install(&content, &status) {
             Ok(()) => {
                 log::info!(
@@ -147,7 +144,6 @@ impl PaxPack {
                     folder(&content).display()
                 );
                 *lock(&status) = Status::Installed;
-                finished.store(true, Ordering::Relaxed);
             }
             Err(e) => {
                 log::warn!("realistic passengers: {e:#}");
@@ -155,10 +151,6 @@ impl PaxPack {
                     Status::Failed(format!("The realistic passengers were not installed: {e}"));
             }
         });
-    }
-
-    pub fn take_finished(&self) -> bool {
-        self.finished.swap(false, Ordering::Relaxed)
     }
 }
 
@@ -168,11 +160,36 @@ fn install(content: &Path, status: &Mutex<Status>) -> anyhow::Result<()> {
     // OMSI_PAX_PACK_URL: another archive (`file://` too), unchecked
     let (url, size, sha256) = match legacy_config::env::var("OMSI_PAX_PACK_URL") {
         Ok(url) => (url, 0, None),
-        Err(_) => crate::updater::release_file(&tag(version), &file(version))
+        Err(_) => release_file(version)
             .map_err(|e| anyhow::anyhow!("they are not available for download yet ({e})"))?,
     };
     let zip = crate::updater::download_dir().join(file(version));
     fetch_and_place(content, &url, size, sha256.as_deref(), &zip, version, status)
+}
+
+/// Its address, size and SHA-256 as GitHub lists them.
+fn release_file(version: u64) -> anyhow::Result<(String, u64, Option<String>)> {
+    let (tag, name) = (tag(version), file(version));
+    let url = format!(
+        "https://api.github.com/repos/{}/releases/tags/{tag}",
+        crate::updater::REPO
+    );
+    let v: serde_json::Value = serde_json::from_str(&crate::updater::fetch_text(&url)?)?;
+    let a = v["assets"]
+        .as_array()
+        .and_then(|a| a.iter().find(|a| a["name"].as_str() == Some(name.as_str())))
+        .ok_or_else(|| anyhow::anyhow!("the release {tag} has no {name}"))?;
+    Ok((
+        a["browser_download_url"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("{name} has no address"))?
+            .to_string(),
+        a["size"].as_u64().unwrap_or(0),
+        a["digest"]
+            .as_str()
+            .and_then(|d| d.strip_prefix("sha256:"))
+            .map(|h| h.to_ascii_lowercase()),
+    ))
 }
 
 fn fetch_and_place(
@@ -237,6 +254,9 @@ mod tests {
     use super::*;
     use std::io::Write;
 
+    /// `LATEST` is the whole process's.
+    static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+
     fn archive(path: &Path, files: &[(&str, &str)]) {
         let mut z = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
         for (name, text) in files {
@@ -249,6 +269,7 @@ mod tests {
 
     #[test]
     fn a_pack_replaces_the_old_one_and_a_bad_archive_keeps_it() {
+        let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("omsi-pax-pack-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let content = dir.join("content");
@@ -310,6 +331,7 @@ mod tests {
     #[test]
     fn a_download_is_checked_before_it_replaces_anything() {
         use sha2::Digest;
+        let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("omsi-pax-fetch-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
