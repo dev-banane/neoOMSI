@@ -14,7 +14,7 @@ mod multiplayer;
 mod pages;
 pub mod phone;
 pub(crate) mod showroom;
-mod state;
+pub(crate) mod state;
 #[cfg_attr(not(target_os = "android"), allow(unused_imports))]
 pub(crate) use state::crash_of;
 mod theme;
@@ -152,9 +152,12 @@ pub struct Launcher {
 }
 
 /// Run the launcher window until it is closed.
-pub fn run(instance: wgpu::Instance) -> anyhow::Result<()> {
+pub fn run(instance: wgpu::Instance, page: Option<&str>) -> anyhow::Result<()> {
     let event_loop = EventLoop::new()?;
     let mut app = Launcher::new(instance);
+    if let Some(page) = page {
+        app.open_page(page);
+    }
     event_loop.run_app(&mut app)?;
     Ok(())
 }
@@ -1347,6 +1350,23 @@ impl Launcher {
         if self.ui.hover(r) {
             self.ui.cursor = winit::window::CursorIcon::Grab;
         }
+    }
+
+    /// `controls` or `controls:1`
+    pub fn open_page(&mut self, page: &str) {
+        let (name, tab) = page.split_once(':').unwrap_or((page, ""));
+        let Some((p, _, _)) = PAGES.iter().find(|(_, n, _)| n.eq_ignore_ascii_case(name.trim())) else {
+            log::warn!("launcher: no page {name:?}");
+            return;
+        };
+        if let Ok(t) = tab.trim().parse::<usize>() {
+            match p {
+                Page::Controls => self.pages.controls_tab = t.min(1),
+                Page::Settings => self.pages.settings_tab = t,
+                _ => {}
+            }
+        }
+        self.go(*p);
     }
 
     pub fn go(&mut self, p: Page) {

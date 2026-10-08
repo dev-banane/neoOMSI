@@ -97,7 +97,7 @@ fn host_status(code: &str) -> Result<network::ws::ServerInfo, String> {
 }
 
 /// The list as saved, with the official server first when it is not in it.
-fn with_official(mut list: Vec<ServerEntry>) -> Vec<ServerEntry> {
+pub(crate) fn with_official(mut list: Vec<ServerEntry>) -> Vec<ServerEntry> {
     if !list
         .iter()
         .any(|s| network::official::is_alias(&s.address))
@@ -115,6 +115,23 @@ fn with_official(mut list: Vec<ServerEntry>) -> Vec<ServerEntry> {
 
 fn servers_path() -> std::path::PathBuf {
     core::data_dir().join("servers.json")
+}
+
+pub(crate) fn saved_servers() -> Vec<ServerEntry> {
+    with_official(
+        std::fs::read(servers_path())
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default(),
+    )
+}
+
+pub(crate) fn store_servers(servers: &[ServerEntry]) -> std::io::Result<()> {
+    std::fs::create_dir_all(core::data_dir())?;
+    std::fs::write(
+        servers_path(),
+        serde_json::to_vec_pretty(servers).unwrap_or_default(),
+    )
 }
 
 /// The duty as it is remembered between launches (`~/.neoomsi/launcher-duty.json`).
@@ -343,12 +360,7 @@ impl State {
             poll_t: 0.0,
             polling: false,
             second_armed: None,
-            servers: with_official(
-                std::fs::read(servers_path())
-                    .ok()
-                    .and_then(|b| serde_json::from_slice(&b).ok())
-                    .unwrap_or_default(),
-            ),
+            servers: saved_servers(),
             server_info: Default::default(),
             server_asked: Default::default(),
             joined_server: None,
@@ -564,11 +576,7 @@ impl State {
 
     /// Keep the server list on disk.
     pub fn save_servers(&self) {
-        let _ = std::fs::create_dir_all(core::data_dir());
-        let _ = std::fs::write(
-            servers_path(),
-            serde_json::to_vec_pretty(&self.servers).unwrap_or_default(),
-        );
+        let _ = store_servers(&self.servers);
     }
 
     /// Ask a server about itself (its status and icon), at most every `every` seconds.

@@ -59,6 +59,7 @@ mod bus_service;
 mod camera_tool;
 mod camera_util;
 mod cli;
+mod control;
 mod controllers;
 #[cfg(windows)]
 mod dinput;
@@ -66,6 +67,7 @@ mod duty_start;
 mod editor_ctl;
 #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
 mod evdev_ff;
+mod game_link;
 mod game_menu;
 mod lab_menu;
 mod lab_options;
@@ -134,11 +136,17 @@ use world_load::*;
 pub fn run() -> Result<()> {
     #[cfg(target_os = "macos")]
     restart_with_allocator_settings();
+    let protocol = std::env::args().any(|a| a == "--control-protocol");
+    // a console would take over the launcher's pipes
     #[cfg(windows)]
-    attach_parent_console();
+    if !protocol {
+        attach_parent_console();
+    }
     let args = Args::parse();
     let bare = std::env::args().len() == 1;
-    logging::init(if args.launcher || (bare && !args.menu) {
+    logging::init(if protocol {
+        "control"
+    } else if args.launcher || (bare && !args.menu) {
         "launcher"
     } else {
         "game"
@@ -156,10 +164,14 @@ pub fn run() -> Result<()> {
                 std::backtrace::Backtrace::force_capture()
             ),
         );
+        game_link::failed(&format!("the game stopped on an error: {info}"));
         default_hook(info);
     }));
     if let Err(e) = config::init(config::default_path()) {
         log::warn!("settings not loaded: {e}");
+    }
+    if protocol {
+        return control::run();
     }
     log::info!(
         "neoOMSI {VERSION}, build {BUILD}{}",
@@ -177,7 +189,10 @@ pub fn run() -> Result<()> {
             return Ok(());
         }
         launcher_statics();
-        return launcher::run(graphics_instance());
+        return launcher::run(graphics_instance(), args.launcher_page.as_deref());
+    }
+    if server_cfg.is_none() {
+        game_link::connect();
     }
     let Some(app) = make_app(args, server_cfg)? else {
         return Ok(());

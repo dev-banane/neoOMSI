@@ -10,6 +10,8 @@
 pub mod index;
 pub mod install;
 pub mod instances;
+pub mod link;
+pub mod protocol;
 
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
@@ -1498,15 +1500,16 @@ fn dsc_candidates(file: &Path, lang: &str) -> Vec<PathBuf> {
     }
     langs
         .into_iter()
-        .map(|l| {
-            let l = match l {
-                "en" => "ENG",
-                "de" => "DEU",
-                other => other,
-            };
-            file.with_file_name(format!("{stem}_{l}.dsc"))
-        })
+        .map(|l| file.with_file_name(format!("{stem}_{}.dsc", omsi_suffix(l))))
         .collect()
+}
+
+fn omsi_suffix(lang: &str) -> &str {
+    match lang {
+        "en" => "ENG",
+        "de" => "DEU",
+        other => other,
+    }
 }
 
 /// A `.dsc` file: the `[name]` / `[friendlyname]` lines and the `[description]` text.
@@ -2628,7 +2631,7 @@ pub fn tutorials() -> Vec<(usize, String, String)> {
     for n in 1..=4usize {
         let p = [lang, "en", "de"]
             .iter()
-            .map(|l| r.join("Tutorials").join(format!("menu_{n}_{l}.html")))
+            .map(|l| r.join("Tutorials").join(format!("menu_{n}_{}.html", omsi_suffix(l))))
             .find(|p| p.is_file());
         let Some(p) = p else { continue };
         let Ok(bytes) = std::fs::read(&p) else {
@@ -2867,7 +2870,8 @@ pub fn bus_preview(bus: &str, paint: &str) -> Result<String> {
         .unwrap_or(false);
     if !fresh {
         let mut cmd = std::process::Command::new(&game);
-        cmd.arg("--root")
+        cmd.stdin(std::process::Stdio::null())
+            .arg("--root")
             .arg(&root)
             .arg("--bus")
             .arg(bus)
@@ -3541,6 +3545,17 @@ mod tests {
         ::legacy_config::remove_content_root(&root);
         let _ = std::fs::remove_dir_all(&root);
         assert_eq!(packs, vec!["Other".to_string()]);
+    }
+
+    #[test]
+    fn tutorials_are_found_by_omsis_language_suffix() {
+        let root = std::path::Path::new("../../../OMSI 2 Original");
+        if !root.join("Tutorials/menu_1_ENG.html").is_file() {
+            return;
+        }
+        let dir = root.join("Tutorials");
+        assert!(dir.join(format!("menu_1_{}.html", super::omsi_suffix("en"))).is_file());
+        assert!(dir.join(format!("menu_1_{}.html", super::omsi_suffix("de"))).is_file());
     }
 
     #[test]
