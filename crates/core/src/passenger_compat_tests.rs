@@ -2166,6 +2166,13 @@ fn a_boarder_holds_a_timetable_bus_until_giving_up_at_a_shut_door() {
     assert_eq!(timetable_bus_holds(&mut h, &f, &b), [(7, 2.5, false)]);
     h.pax_mut(0).unwrap().door_wait = 60.0;
     assert!(timetable_bus_holds(&mut h, &f, &b).is_empty());
+    h.pax_mut(0).unwrap().door = Some(0);
+    b.entry_open[0] = true;
+    assert_eq!(
+        timetable_bus_holds(&mut h, &f, &b),
+        [(7, 2.5, false)],
+        "the door opened after all: boarding again"
+    );
 }
 
 #[test]

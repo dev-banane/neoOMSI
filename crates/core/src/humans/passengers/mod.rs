@@ -142,7 +142,9 @@ impl Humans {
         }
         // timetable buses wait while people still get on or off. Not for anybody without a
         // place of their own (at the gather point of a full bus, `Task::ToBus`), outside the
-        // stop's box, or given up at a shut door: the bus held for them waited for good
+        // stop's box, or given up at a door still shut: the bus held for them waited for good.
+        // (`door_wait` is not reset when the door opens: it keeps a natural-mode boarder at
+        // the open door, see `choose_entry`)
         for bn in buses {
             let BusId::Ai(id) = bn.id else { continue };
             if bn.speed.abs() > 0.5 {
@@ -156,7 +158,7 @@ impl Humans {
                 }
                 let boarding = x.task == Task::WalkingToBus
                     && x.seat.is_some()
-                    && x.door_wait < DOOR_GIVE_UP
+                    && (x.door_wait < DOOR_GIVE_UP || x.door.is_some_and(|d| bn.boarding_open(d)))
                     && x.stop.is_some_and(|s| self.in_stop_box(s, bn.id));
                 let alighting = x.task == Task::InBusToExit && x.inside == Some(bn.id);
                 if alighting && x.doorway.is_some() {
