@@ -168,7 +168,7 @@ pub(crate) fn run_move(app: &mut App, kind: &ListKind, action: &str, mv: Move) -
             "free" => {
                 app.duty = None;
                 if let Some(p) = app.player.as_mut() {
-                    p.vehicle.host.clear_timetable();
+                    crate::schedule_paper::clear_vehicle(&mut p.vehicle);
                 }
                 app.service_msg = Some((::i18n::translate("pause.msg.free_drive", &[]), 4.0));
                 None
