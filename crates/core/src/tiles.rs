@@ -1193,7 +1193,8 @@ impl Streamer {
     /// One frame of streaming around `centers`: take in what the worker finished, upload and
     /// place for about `budget` (always a little), unload what is far from all of them (for
     /// about half a budget more, at least one tile), and start the next batch. Returns true
-    /// when the loaded tiles changed (the caller then refreshes whatever copies world data).
+    /// when the loaded tiles changed (the caller then flushes the world's lists, see
+    /// [`crate::scene::World::flush_tile_lists`], and refreshes whatever copies world data).
     pub fn update(
         &mut self,
         renderer: &::render::Renderer,
@@ -1334,7 +1335,7 @@ impl Streamer {
         }
         let t_unload = t0.elapsed();
         if changed {
-            self.world.refresh_tile_lists();
+            self.world.mark_tile_lists_dirty();
         }
         // Loading and unloading tiles leaves the allocator with pages it keeps for later: they
         // count as the game's memory until they are handed back (half a gigabyte on
@@ -1376,11 +1377,10 @@ impl Streamer {
             self.slow_frames += 1;
             if ::legacy_config::env::var_os("OMSI_PROFILE").is_some() {
                 log::info!(
-                    "tile streaming: {:.0} ms this frame ({uploaded} uploaded in {:.0} ms, {unloaded} unloaded in {:.0} ms, lists {:.0} ms)",
+                    "tile streaming: {:.0} ms this frame ({uploaded} uploaded in {:.0} ms, {unloaded} unloaded in {:.0} ms)",
                     total.as_secs_f64() * 1000.0,
                     t_upload.as_secs_f64() * 1000.0,
-                    (t_unload - t_upload).as_secs_f64() * 1000.0,
-                    (total - t_unload).as_secs_f64() * 1000.0
+                    (t_unload - t_upload).as_secs_f64() * 1000.0
                 );
             }
         }

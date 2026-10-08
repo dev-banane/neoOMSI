@@ -928,6 +928,9 @@ impl App {
                     std::time::Duration::from_millis(30),
                     None,
                 );
+                if let Some(w) = self.world.as_ref() {
+                    w.flush_tile_lists();
+                }
                 streamer.initial_progress()
             }
             None => None,
@@ -1062,23 +1065,40 @@ impl App {
             self.renderer.as_ref(),
             self.scene.as_mut(),
         ) else {
+            if let Some(w) = self.world.as_ref() {
+                let __t = Instant::now();
+                if w.flush_tile_lists() {
+                    *self.profile.entry("streaming.lists").or_default() +=
+                        __t.elapsed().as_secs_f64();
+                }
+            }
             return;
         };
+        let __t = Instant::now();
         w.apply_texture_upgrades(
             r,
             scene,
             Some(Instant::now() + std::time::Duration::from_millis(2)),
         );
+        let __t2 = Instant::now();
+        *self.profile.entry("streaming.upgrades").or_default() += (__t2 - __t).as_secs_f64();
         w.update_texture_budget(r, scene, &centers, false);
-        if centers.is_empty()
-            || !streamer.update(
-            r,
-            scene,
-            &centers,
-            std::time::Duration::from_millis(6),
-            self.audio.as_ref(),
-        )
-        {
+        let __t = Instant::now();
+        *self.profile.entry("streaming.texture_budget").or_default() += (__t - __t2).as_secs_f64();
+        let changed = !centers.is_empty()
+            && streamer.update(
+                r,
+                scene,
+                &centers,
+                std::time::Duration::from_millis(6),
+                self.audio.as_ref(),
+            );
+        let __t2 = Instant::now();
+        *self.profile.entry("streaming.tiles").or_default() += (__t2 - __t).as_secs_f64();
+        if w.flush_tile_lists() {
+            *self.profile.entry("streaming.lists").or_default() += __t2.elapsed().as_secs_f64();
+        }
+        if !changed {
             return;
         }
         if let Some(p) = self.player.as_mut() {

@@ -416,9 +416,16 @@ impl Renderer {
     }
 
     /// Drop the `n` finest mip levels to reduce GPU memory use. The remaining levels are
-    /// copied into a smaller texture. Returns false if the texture cannot shrink, for example
-    /// when a block format would no longer be aligned. Rebind materials afterward.
-    pub fn drop_top_levels(&self, scene: &mut Scene, id: TextureId, n: u32) -> bool {
+    /// copied into a smaller texture by `encoder` (submit it before drawing). Returns false if
+    /// the texture cannot shrink, for example when a block format would no longer be aligned.
+    /// Rebind materials afterward.
+    pub fn drop_top_levels(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        scene: &mut Scene,
+        id: TextureId,
+        n: u32,
+    ) -> bool {
         let Some(t) = scene.textures.get(id) else {
             return false;
         };
@@ -450,11 +457,6 @@ impl Renderer {
                 | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("drop levels"),
-            });
         for l in 0..new_levels {
             let (lw, lh) = ((nw >> l).max(1), (nh >> l).max(1));
             let size = wgpu::Extent3d {
@@ -478,7 +480,6 @@ impl Renderer {
                 size,
             );
         }
-        self.queue.submit([encoder.finish()]);
         scene.textures[id] =
             GpuTexture::new(texture, (nw, nh), texture_bytes(format, nw, nh, new_levels));
         true

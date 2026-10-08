@@ -360,6 +360,7 @@ pub(crate) fn spawn_player(
             scene,
             &::simulation::collision::Obb::from_box(bb, vehicle.position, vehicle.heading),
         );
+        world.flush_tile_lists();
     }
     let render = world.add_vehicle(renderer, scene, &vt, scheme);
     // coupled rear sections / trailers

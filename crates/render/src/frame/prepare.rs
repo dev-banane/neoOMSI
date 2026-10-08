@@ -171,6 +171,7 @@ impl Renderer {
             }
             return;
         }
+        let rebuild_t = self.profiling.then(std::time::Instant::now);
         scene.changed.clear();
         scene.changed_mark.clear();
         let mut mats: Vec<[[f32; 4]; 4]> = Vec::new();
@@ -202,6 +203,7 @@ impl Renderer {
                 self.queue.write_buffer(buf, 0, bytes);
                 self.queue.write_buffer(params_buf, 0, cpu_param_bytes);
                 scene.dirty = false;
+                self.count_rebuild(rebuild_t);
                 return;
             }
         }
@@ -224,6 +226,22 @@ impl Renderer {
         scene.params_buf = Some(params_buf);
         self.rebuild_camera_bind_group(scene);
         scene.dirty = false;
+        self.count_rebuild(rebuild_t);
+    }
+
+    fn count_rebuild(&self, start: Option<std::time::Instant>) {
+        if let Some(t) = start {
+            *self
+                .stats
+                .borrow_mut()
+                .entry("prepare.rebuild")
+                .or_default() += t.elapsed().as_secs_f64();
+            *self
+                .counts
+                .borrow_mut()
+                .entry("prepare.rebuilds")
+                .or_default() += 1.0;
+        }
     }
 
     pub(crate) fn rebuild_camera_bind_group(&self, scene: &mut Scene) {

@@ -451,6 +451,7 @@ pub(crate) fn run_offscreen(
         }
     }
     for i in 0..total_frames {
+        world.flush_tile_lists();
         let t_s = i as f32 * dt;
         if server {
             srv_clock += dt as f64 * lan_off.as_ref().map(|l| l.clock_speed).unwrap_or(1.0);

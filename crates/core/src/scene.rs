@@ -2044,9 +2044,9 @@ pub struct World {
     /// Roller-blind pictures (`[matl_freetex]`) uploaded as RGBA, to be compressed.
     freetex_upgrades: Arc<Mutex<Vec<PathBuf>>>,
     /// OMSI's `[texmemlimit]`: bytes the scenery and vehicle textures may take on the GPU
-    /// (0 = no limit), and when the budget was last looked at.
+    /// (0 = no limit), and when the budget is to be looked at next.
     texture_limit: std::sync::atomic::AtomicU64,
-    budget_checked: Mutex<Option<std::time::Instant>>,
+    budget_due: Mutex<Option<std::time::Instant>>,
     /// Traffic-path lanes collected while building tiles.
     pub lanes: Mutex<Vec<::simulation::traffic::Lane>>,
     /// The tiles whose lanes and parked cars have been put into `lanes` and `parked_cars`.
@@ -2118,6 +2118,9 @@ pub struct World {
     /// Counts the changes of the loaded tiles (see [`World::refresh_tile_lists`]): whoever
     /// keeps what it derived from the stops, the waiting places or the ground looks again.
     pub tiles_generation: std::sync::atomic::AtomicU64,
+    /// The loaded tiles changed since the lists were last rebuilt: see
+    /// [`World::flush_tile_lists`].
+    tile_lists_dirty: std::sync::atomic::AtomicBool,
     /// Parked cars placed on `[carpark_p]` spaces: world position and heading (deg), for
     /// the traffic to steer round (see `lane_tiles`).
     pub parked_cars: Mutex<Vec<(DVec3, f64)>>,
@@ -3015,7 +3018,7 @@ impl World {
             upgrades_done: Default::default(),
             freetex_upgrades: Default::default(),
             texture_limit: Default::default(),
-            budget_checked: Default::default(),
+            budget_due: Default::default(),
             lanes: Mutex::new(Vec::new()),
             lane_tiles: Mutex::new(Vec::new()),
             traffic_lights: Mutex::new(Vec::new()),
@@ -3036,6 +3039,7 @@ impl World {
             waiting_places: Mutex::new(Vec::new()),
             waiting_cabins: Mutex::new(HashMap::new()),
             tiles_generation: std::sync::atomic::AtomicU64::new(0),
+            tile_lists_dirty: std::sync::atomic::AtomicBool::new(false),
             parked_cars: Mutex::new(Vec::new()),
             parked_boxes: Mutex::new(Arc::new(Vec::new())),
             petrol_stations: Mutex::new(Vec::new()),
@@ -8259,7 +8263,7 @@ impl World {
         self.departed_objects
             .lock()
             .insert(key, (p.clone(), obst, boxes));
-        self.refresh_tile_lists();
+        self.mark_tile_lists_dirty();
         Some(p)
     }
 
@@ -8482,7 +8486,7 @@ impl World {
         }
         self.departed.lock().remove(&key);
         self.parked_objects.lock().insert(key, p);
-        self.refresh_tile_lists();
+        self.mark_tile_lists_dirty();
         true
     }
 
@@ -8534,7 +8538,7 @@ impl World {
                 m.bounds.z1 += dz;
             }
         }
-        self.refresh_tile_lists();
+        self.mark_tile_lists_dirty();
     }
 
     /// The file tile (tx, ty) is read from, and the map folder's place relative to `root`.
@@ -8743,8 +8747,30 @@ impl World {
         out
     }
 
+    /// The loaded tiles' objects changed: the lists are rebuilt once, at the next
+    /// [`World::flush_tile_lists`] (rebuilt at once, a LAN client mirroring a host's hundred
+    /// empty spaces rebuilt them a hundred times in one frame).
+    pub fn mark_tile_lists_dirty(&self) {
+        self.tile_lists_dirty
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Rebuild the lists if anything marked them dirty since. True when it did.
+    pub fn flush_tile_lists(&self) -> bool {
+        if !self
+            .tile_lists_dirty
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return false;
+        }
+        self.refresh_tile_lists();
+        true
+    }
+
     /// Rebuild the world's lists (stops, obstacles, lights, lamps) from the loaded tiles.
     pub fn refresh_tile_lists(&self) {
+        self.tile_lists_dirty
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         let states = self.tile_state.lock();
         let mut keys: Vec<&(i32, i32)> = states.keys().collect();
         keys.sort();
@@ -9142,11 +9168,12 @@ impl World {
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// Keep the textures within their budget, once a second (`force`: now): while they take
-    /// more, the scenery textures only far tiles use lose their finest mip level, the
-    /// farthest first, down to 64 texels a side and never within 150 m of `centers` (the
-    /// camera, the player's bus); when there is room again, those that came within 400 m
-    /// are read again whole on a worker and swapped back. Vehicle textures count but keep
+    /// Keep the textures within their budget, once a second (`force`: now; every 100 ms while
+    /// there is more to shrink than a pass does): while they take more, the scenery textures
+    /// only far tiles use lose their finest mip level, the farthest first, down to 64 texels
+    /// a side and never within 150 m of `centers` (the camera, the player's bus); when there
+    /// is room again, those that came within 400 m are read again whole on a worker and
+    /// swapped back. Vehicle textures count but keep
     /// their levels (a fleet set nobody draws leaves the GPU anyway). Returns the textures
     /// shrunk or sent to be read again.
     pub fn update_texture_budget(
@@ -9159,24 +9186,21 @@ impl World {
         const NEAR: f64 = 150.0;
         const RESTORE: f64 = 400.0;
         const MIN_SIDE: u32 = 64;
+        const SHRINK_PER_PASS: usize = 32;
         let limit = self
             .texture_limit
             .load(std::sync::atomic::Ordering::Relaxed);
         if limit == 0 || centers.is_empty() {
             return 0;
         }
+        let t0 = std::time::Instant::now();
         {
-            let mut last = self.budget_checked.lock();
-            if !force
-                && last
-                .map(|t| t.elapsed().as_secs_f32() < 1.0)
-                .unwrap_or(false)
-            {
+            let mut due = self.budget_due.lock();
+            if !force && due.is_some_and(|d| t0 < d) {
                 return 0;
             }
-            *last = Some(std::time::Instant::now());
+            *due = Some(t0 + std::time::Duration::from_secs(1));
         }
-        let t0 = std::time::Instant::now();
         let vehicle_bytes: u64 = self
             .vehicle_textures
             .lock()
@@ -9294,64 +9318,87 @@ impl World {
                 }
             }
         }
-        if usage > limit + limit / 32 {
-            entries.sort_by(|a, b| b.0.total_cmp(&a.0));
-            let mut over = usage - (limit - limit / 10);
-            for (d, p) in &entries {
-                // (96 a second: at 16 a map's first tiles stayed over a small card's budget
-                // for a minute and a half)
-                if over == 0 || shrunk.len() >= 256 || *d < NEAR * 1.0 {
-                    break;
-                }
-                if spline_textures.contains(p) {
-                    continue;
-                }
-                let Some(e) = gpu.textures.get_mut(p) else {
-                    continue;
-                };
-                let Some((w, h, levels)) = renderer.texture_levels(scene, e.id) else {
-                    continue;
-                };
-                if w.min(h) / 2 < MIN_SIDE || levels < 2 {
-                    continue;
-                }
-                let before = e.bytes;
-                // far away and big: two levels at once
-                let n = if *d > 700.0 && w.min(h) / 4 >= MIN_SIDE.max(256) && levels > 2 {
-                    2
-                } else {
-                    1
-                };
-                if renderer.drop_top_levels(scene, e.id, n) {
-                    e.bytes = scene.texture_bytes_of(e.id);
-                    e.dropped += n;
-                    over = over.saturating_sub(before - e.bytes);
-                    shrunk.push(e.id);
-                }
-            }
-        } else {
-            // room for the near ones to come back (with a tenth kept free)
-            entries.sort_by(|a, b| a.0.total_cmp(&b.0));
-            let mut room = (limit - limit / 10).saturating_sub(usage);
+        let incoming: u64 = {
             let pending = self.upgrades_pending.lock();
-            for (d, p) in &entries {
-                if *d > RESTORE || restoring >= 16 {
-                    break;
+            let g = &*gpu;
+            g.textures
+                .iter()
+                .filter(|(p, e)| {
+                    e.dropped > 0 && (pending.contains(*p) || g.wants_restore.contains(*p))
+                })
+                .map(|(_, e)| whole_bytes(e.bytes, e.dropped) - e.bytes)
+                .sum()
+        };
+        let mut encoder: Option<wgpu::CommandEncoder> = None;
+        match budget_step(usage, incoming, limit) {
+            BudgetStep::Shrink(mut over) => {
+                entries.sort_by(|a, b| b.0.total_cmp(&a.0));
+                for (d, p) in &entries {
+                    if over == 0 || shrunk.len() >= SHRINK_PER_PASS || *d < NEAR {
+                        break;
+                    }
+                    if spline_textures.contains(p) {
+                        continue;
+                    }
+                    let Some(e) = gpu.textures.get_mut(p) else {
+                        continue;
+                    };
+                    let Some((w, h, levels)) = renderer.texture_levels(scene, e.id) else {
+                        continue;
+                    };
+                    if w.min(h) / 2 < MIN_SIDE || levels < 2 {
+                        continue;
+                    }
+                    let before = e.bytes;
+                    // far away and big: two levels at once
+                    let n = if *d > 700.0 && w.min(h) / 4 >= MIN_SIDE.max(256) && levels > 2 {
+                        2
+                    } else {
+                        1
+                    };
+                    let enc = encoder.get_or_insert_with(|| {
+                        renderer
+                            .device
+                            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                                label: Some("drop levels"),
+                            })
+                    });
+                    if renderer.drop_top_levels(enc, scene, e.id, n) {
+                        e.bytes = scene.texture_bytes_of(e.id);
+                        e.dropped += n;
+                        over = over.saturating_sub(before - e.bytes);
+                        shrunk.push(e.id);
+                    }
                 }
-                let Some(e) = gpu.textures.get(p) else {
-                    continue;
-                };
-                if e.dropped == 0 || pending.contains(p) {
-                    continue;
+                if over > 0 && shrunk.len() >= SHRINK_PER_PASS {
+                    *self.budget_due.lock() = Some(t0 + std::time::Duration::from_millis(100));
                 }
-                let whole = e.bytes << (2 * e.dropped.min(8));
-                if whole - e.bytes > room {
-                    break;
-                }
-                room -= whole - e.bytes;
-                gpu.wants_restore.push(p.clone());
-                restoring += 1;
             }
+            BudgetStep::Restore(mut room) => {
+                entries.sort_by(|a, b| a.0.total_cmp(&b.0));
+                let pending = self.upgrades_pending.lock();
+                for (d, p) in &entries {
+                    if *d > RESTORE || restoring >= 16 {
+                        break;
+                    }
+                    let Some(e) = gpu.textures.get(p) else {
+                        continue;
+                    };
+                    if e.dropped == 0 || pending.contains(p) || gpu.wants_restore.contains(p) {
+                        continue;
+                    }
+                    let grow = whole_bytes(e.bytes, e.dropped) - e.bytes;
+                    if grow > room {
+                        break;
+                    }
+                    room -= grow;
+                    gpu.wants_restore.push(p.clone());
+                    restoring += 1;
+                }
+            }
+        }
+        if let Some(enc) = encoder {
+            renderer.queue.submit([enc.finish()]);
         }
         drop(gpu);
         let rebound = renderer.rebind_textures(scene, &shrunk);
@@ -9484,6 +9531,25 @@ pub fn tile_companion(path: &Path, ext: &str) -> PathBuf {
         .map(|d| ::legacy_config::resolve_path(&d, &name))
         .find(|p| ::legacy_config::vfs::exists(p))
         .unwrap_or(direct)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BudgetStep {
+    Shrink(u64),
+    Restore(u64),
+}
+
+fn budget_step(usage: u64, incoming: u64, limit: u64) -> BudgetStep {
+    let target = limit - limit / 10;
+    if usage > limit + limit / 32 {
+        BudgetStep::Shrink(usage - target)
+    } else {
+        BudgetStep::Restore(target.saturating_sub(usage + incoming))
+    }
+}
+
+fn whole_bytes(bytes: u64, dropped: u32) -> u64 {
+    bytes << (2 * dropped.min(8))
 }
 
 /// An object as the object editor has left it: moved, turned about its place, or gone.
@@ -13924,6 +13990,82 @@ pub(crate) fn resolve_scenery_freetex_name<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn texture_budget_leaves_a_gap_between_shrinking_and_restoring() {
+        use BudgetStep::*;
+        let limit = 1_000_000_000u64;
+        let target = limit - limit / 10;
+        assert_eq!(
+            budget_step(limit + limit / 16, 0, limit),
+            Shrink(limit + limit / 16 - target)
+        );
+        for usage in [target, limit, limit + limit / 32] {
+            assert_eq!(budget_step(usage, 0, limit), Restore(0), "{usage}");
+        }
+        assert_eq!(budget_step(target - 100, 0, limit), Restore(100));
+        assert_eq!(budget_step(target - 100, 40, limit), Restore(60));
+        assert_eq!(budget_step(target - 100, 100, limit), Restore(0));
+        assert_eq!(budget_step(target - 100, 500, limit), Restore(0));
+    }
+
+    #[test]
+    fn tile_lists_are_rebuilt_once_however_often_they_were_marked() {
+        let root = std::env::temp_dir().join(format!(
+            "neoomsi-lists-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("global.cfg"),
+            "[name]\nSynthetic lists\n[map]\n0\n0\ntile_0_0.map\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("prop.x"),
+            "xof 0303txt 0032\nMesh prop {3;0;0;0;,1;0;0;,0;3;0;;1;3;0,1,2;;}",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("prop.sco"),
+            "[fixed]\n[boundingbox]\n2\n2\n3\n0\n0\n1.5\n[mesh]\nprop.x\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("tile_0_0.map"),
+            "[version]\n14\n[object]\n0\nprop.sco\n42\n100\n100\n0\n0\n0\n0\n0\n",
+        )
+        .unwrap();
+        let world = World::open(&root, &root.join("global.cfg"), 20261001).unwrap();
+        let (prepared, _) = world.prepare_tiles(&[(0, 0, root.join("tile_0_0.map"))]);
+        assert_eq!(prepared.len(), 1);
+        let generation = || {
+            world
+                .tiles_generation
+                .load(std::sync::atomic::Ordering::Relaxed)
+        };
+        let boxes = || world.collision.lock().boxes.len();
+        let before = generation();
+        assert!(!world.flush_tile_lists());
+        assert_eq!((generation(), boxes()), (before, 0));
+        for _ in 0..3 {
+            world.mark_tile_lists_dirty();
+        }
+        assert_eq!((generation(), boxes()), (before, 0));
+        assert!(world.flush_tile_lists());
+        assert_eq!((generation(), boxes()), (before + 1, 1));
+        assert!(!world.flush_tile_lists());
+        assert_eq!(generation(), before + 1);
+        world.mark_tile_lists_dirty();
+        world.refresh_tile_lists();
+        assert!(!world.flush_tile_lists());
+        assert_eq!(generation(), before + 2);
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn nightlight_follows_the_objects_darkness_threshold() {
