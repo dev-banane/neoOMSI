@@ -253,7 +253,7 @@ pub(super) fn call(cmd: &str, a: &Value) -> Result<Value> {
             servers::store(&servers::with_official(list.servers))?;
             json!({})
         }
-        "version" => json!({ "version": crate::startup::VERSION, "protocol": lib::protocol::VERSION.parse::<u32>().unwrap_or(0) }),
+        "version" => json!({ "version": crate::startup::VERSION, "protocol": launcher_protocol::VERSION.parse::<u32>().unwrap_or(0) }),
         _ => return Err(anyhow!("this engine has no command {cmd:?}")),
     })
 }

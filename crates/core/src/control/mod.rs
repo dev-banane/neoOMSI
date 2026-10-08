@@ -2,8 +2,9 @@ mod commands;
 mod minimap;
 mod pads;
 
-use omsi_launcher_lib::protocol::{self, Message};
-use omsi_launcher_lib::{Instance, link};
+use launcher_protocol::{self as protocol, Message};
+use launcher_protocol::link;
+use omsi_launcher_lib::Instance;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -423,7 +424,7 @@ fn phase_of(i: &Instance, before: Option<&Phase>, now: u64) -> Phase {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use omsi_launcher_lib::link::GameState;
+    use launcher_protocol::link::GameState;
 
     #[derive(Clone, Default)]
     struct Shared(Arc<Mutex<Vec<u8>>>);

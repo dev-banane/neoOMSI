@@ -10,8 +10,6 @@
 pub mod index;
 pub mod install;
 pub mod instances;
-pub mod link;
-pub mod protocol;
 pub mod servers;
 
 use anyhow::{Context, Result, anyhow};
@@ -3442,15 +3440,17 @@ pub fn start_external_launcher(game: &Path) -> Result<bool> {
     let Some(app) = external_launcher(game) else {
         return Ok(false);
     };
-    let mut cmd = std::process::Command::new(&app);
     #[cfg(target_os = "linux")]
     if !linux_sandbox_works(&app) {
-        log_to_file(
-            "launcher: no Chromium sandbox here (chrome-sandbox is not setuid root and user namespaces are restricted): started without it",
-        );
-        cmd.arg("--no-sandbox");
+        let helper = app.with_file_name("chrome-sandbox");
+        return Err(anyhow!(
+            "{} needs Chromium's sandbox, which this system blocks (user namespaces are restricted); set its helper up once with `sudo chown root:root {h} && sudo chmod 4755 {h}`",
+            app.display(),
+            h = helper.display(),
+        ));
     }
-    cmd.env("NEOOMSI_ENGINE_PATH", game)
+    std::process::Command::new(&app)
+        .env("NEOOMSI_ENGINE_PATH", game)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())

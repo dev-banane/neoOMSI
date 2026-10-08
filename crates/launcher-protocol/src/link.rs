@@ -1,8 +1,7 @@
-use crate::protocol::{self, Message};
+use crate::{self as protocol, Message};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
-use std::hash::{BuildHasher, Hasher};
 use std::io::Read;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -46,17 +45,10 @@ struct Link {
 
 static LINK: OnceLock<Link> = OnceLock::new();
 
-fn token() -> String {
-    let random = || std::collections::hash_map::RandomState::new().build_hasher().finish();
-    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
-    h.write_u128(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0),
-    );
-    h.write_u32(std::process::id());
-    format!("{:016x}{:016x}{:016x}", random(), random(), h.finish())
+fn token() -> std::io::Result<String> {
+    let mut bytes = [0u8; 32];
+    getrandom::fill(&mut bytes).map_err(|e| std::io::Error::other(e.to_string()))?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
 fn valid_instance(id: &str) -> bool {
@@ -76,7 +68,7 @@ pub fn listen(changed: impl Fn(&str) + Send + Sync + 'static) -> std::io::Result
     let addr = listener.local_addr()?;
     let link = Link {
         addr,
-        token: token(),
+        token: token()?,
         games: Mutex::new(HashMap::new()),
         changed: Box::new(changed),
     };
@@ -247,6 +239,14 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
             f()
         })
+    }
+
+    #[test]
+    fn tokens_are_256_random_bits() {
+        let (a, b) = (token().unwrap(), token().unwrap());
+        assert_eq!(a.len(), 64);
+        assert!(a.bytes().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(a, b);
     }
 
     #[test]

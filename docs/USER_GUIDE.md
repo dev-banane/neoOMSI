@@ -14,7 +14,7 @@ This guide covers running neoOMSI, essential keybindings, and common configurati
 5. Select a map, vehicle, and duty, then start the simulation.
 
 > [!NOTE]
-> **Linux:** the launcher runs in Chromium's sandbox. Where the system restricts the user namespaces it needs (Ubuntu 24.04 and later), it starts without it unless the sandbox helper is set up once, from the neoOMSI folder:
+> **Linux:** the launcher runs in Chromium's sandbox. Where the system restricts the user namespaces it needs (Ubuntu 24.04 and later), the built-in launcher opens instead until the sandbox helper is set up once, from the neoOMSI folder:
 >
 > ```sh
 > sudo chown root:root launcher/chrome-sandbox && sudo chmod 4755 launcher/chrome-sandbox

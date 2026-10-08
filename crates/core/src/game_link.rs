@@ -1,5 +1,5 @@
-use omsi_launcher_lib::link::{ENV_ADDR, ENV_TOKEN};
-use omsi_launcher_lib::protocol::{self, Message};
+use launcher_protocol::link::{ENV_ADDR, ENV_TOKEN};
+use launcher_protocol::{self as protocol, Message};
 use serde_json::json;
 use std::net::TcpStream;
 use std::sync::Mutex;
