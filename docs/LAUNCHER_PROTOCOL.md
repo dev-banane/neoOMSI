@@ -76,7 +76,8 @@ serialises them.
 | `instances`, `launch`, `stop`, `log` | `Duty` / `{pid}` / `{pid, lines?}` | `stop` asks over the game link first, then by signal |
 | `join` | `{text}` | |
 | `settings`, `save_settings`, `option_presets` | changed keys | saving `pax_models: "realistic"` downloads the pack when it is missing |
-| `pax_pack`, `install_pax_pack` | – | the realistic passengers' pack: `{state, done, total, message}` |
+| `pax_pack`, `install_pax_pack` | – | the realistic passengers' pack: `{state, done, total, message, installed, latest}`; `latest` (`{version, notes, page, published}`) is the newest `realistic-pax-v<n>` release, looked for every 6 hours, and makes an older pack `outdated` |
+| `update_check` | – | the newest neoOMSI release for this build's channel and platform (`{version, page, notes, prerelease, size}`), or `null` |
 | `keybindings`, `save_keybindings`, `controllers`, `save_controllers` | the whole list | |
 | `preview` | `{bus, paint}` | the path of a `.glb` file |
 | `situations` | `{map}` | |
