@@ -12,6 +12,7 @@ pub mod install;
 pub mod instances;
 pub mod link;
 pub mod protocol;
+pub mod servers;
 
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
@@ -3424,9 +3425,11 @@ pub fn start_external_launcher(game: &Path) -> Result<bool> {
         return Ok(false);
     };
     let mut cmd = std::process::Command::new(&app);
-    // Chromium will not start without its sandbox helper, which needs root to be set up:
-    // an unpacked app (not an installed package) never has it
-    if cfg!(target_os = "linux") {
+    #[cfg(target_os = "linux")]
+    if !linux_sandbox_works(&app) {
+        log_to_file(
+            "launcher: no Chromium sandbox here (chrome-sandbox is not setuid root and user namespaces are restricted): started without it",
+        );
         cmd.arg("--no-sandbox");
     }
     cmd.env("NEOOMSI_ENGINE_PATH", game)
@@ -3436,6 +3439,31 @@ pub fn start_external_launcher(game: &Path) -> Result<bool> {
         .spawn()
         .with_context(|| format!("starting {}", app.display()))?;
     Ok(true)
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn chromium_sandbox_available(
+    helper: Option<(u32, u32)>,
+    sysctl: impl Fn(&str) -> Option<String>,
+) -> bool {
+    if helper.is_some_and(|(uid, mode)| uid == 0 && mode & 0o4000 != 0) {
+        return true;
+    }
+    let is = |key: &str, off: &str| sysctl(key).is_some_and(|v| v.trim() == off);
+    !(is("kernel/unprivileged_userns_clone", "0")
+        || is("kernel/apparmor_restrict_unprivileged_userns", "1")
+        || is("user/max_user_namespaces", "0"))
+}
+
+#[cfg(target_os = "linux")]
+fn linux_sandbox_works(app: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let helper = std::fs::metadata(app.with_file_name("chrome-sandbox"))
+        .ok()
+        .map(|m| (m.uid(), m.mode()));
+    chromium_sandbox_available(helper, |key| {
+        std::fs::read_to_string(Path::new("/proc/sys").join(key)).ok()
+    })
 }
 
 /// A phone runs one program: the launcher hands the game's command line over here and the
@@ -3584,6 +3612,34 @@ mod tests {
         ::legacy_config::remove_content_root(&root);
         let _ = std::fs::remove_dir_all(&root);
         assert_eq!(packs, vec!["Other".to_string()]);
+    }
+
+    #[test]
+    fn the_launcher_keeps_its_sandbox_whenever_chromium_can_have_one() {
+        let sysctl = |pairs: &'static [(&'static str, &'static str)]| {
+            move |key: &str| {
+                pairs
+                    .iter()
+                    .find(|(k, _)| *k == key)
+                    .map(|(_, v)| format!("{v}
+"))
+            }
+        };
+        let none: &[(&str, &str)] = &[];
+        let ubuntu: &[(&str, &str)] = &[("kernel/apparmor_restrict_unprivileged_userns", "1")];
+        let debian_off: &[(&str, &str)] = &[("kernel/unprivileged_userns_clone", "0")];
+        let open: &[(&str, &str)] = &[
+            ("kernel/unprivileged_userns_clone", "1"),
+            ("kernel/apparmor_restrict_unprivileged_userns", "0"),
+        ];
+        assert!(chromium_sandbox_available(None, sysctl(none)), "namespaces allowed");
+        assert!(chromium_sandbox_available(None, sysctl(open)));
+        assert!(!chromium_sandbox_available(None, sysctl(ubuntu)), "Ubuntu 24.04 restricts them");
+        assert!(!chromium_sandbox_available(None, sysctl(debian_off)));
+        let setuid_root = Some((0, 0o104755));
+        assert!(chromium_sandbox_available(setuid_root, sysctl(ubuntu)), "the helper is enough");
+        assert!(!chromium_sandbox_available(Some((1000, 0o104755)), sysctl(ubuntu)), "not root's");
+        assert!(!chromium_sandbox_available(Some((0, 0o100755)), sysctl(ubuntu)), "not setuid");
     }
 
     #[test]

@@ -14,7 +14,7 @@ mod multiplayer;
 mod pages;
 pub mod phone;
 pub(crate) mod showroom;
-pub(crate) mod state;
+mod state;
 #[cfg_attr(not(target_os = "android"), allow(unused_imports))]
 pub(crate) use state::crash_of;
 mod theme;

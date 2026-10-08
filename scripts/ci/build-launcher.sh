@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Build the launcher (github.com/neoOMSI/launcher, branch main) into the package:
-# dist/<platform>/launcher, on macOS into neoOMSI.app. LAUNCHER_SRC=../launcher builds a
-# local checkout as it is instead.
+# Build the launcher (github.com/neoOMSI/launcher at the commit in scripts/launcher-ref) into
+# the package: dist/<platform>/launcher, on macOS into neoOMSI.app. LAUNCHER_SRC=../launcher
+# builds a local checkout as it is instead.
 set -euo pipefail
 
 platform="${1:?usage: build-launcher.sh <windows|macos|linux> <x64|arm64>}"
@@ -18,9 +18,16 @@ esac
 if [ -n "${LAUNCHER_SRC:-}" ]; then
   src="$(cd "$LAUNCHER_SRC" && pwd)"
 else
+  ref="$(tr -d '[:space:]' < "$root/scripts/launcher-ref")"
+  if ! [[ "$ref" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "scripts/launcher-ref must hold a full launcher commit SHA, not '$ref'" >&2
+    exit 1
+  fi
   src="${RUNNER_TEMP:-$root/target}/neoomsi-launcher-src"
   rm -rf "$src"
-  git clone --quiet --depth 1 --branch main https://github.com/neoOMSI/launcher.git "$src"
+  git init --quiet "$src"
+  git -C "$src" fetch --quiet --depth 1 https://github.com/neoOMSI/launcher.git "$ref"
+  git -C "$src" checkout --quiet --detach FETCH_HEAD
 fi
 
 cd "$src"

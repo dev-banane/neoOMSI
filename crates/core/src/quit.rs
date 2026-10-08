@@ -71,6 +71,9 @@ fn fire(sig: i32) {
 /// as `nohup` does, stays ignored), or by `request`.
 pub fn install(wake: impl FnOnce(i32) + Send + 'static) {
     *WAKE.lock().unwrap_or_else(|e| e.into_inner()) = Some(Box::new(wake));
+    if let Some(sig) = requested() {
+        fire(sig);
+    }
     #[cfg(unix)]
     {
         for sig in [SIGTERM, SIGINT, SIGHUP] {
@@ -130,6 +133,28 @@ pub fn request() {
 /// The signal that asked the game to end, if one did.
 pub fn requested() -> Option<i32> {
     Some(REQUESTED.load(Ordering::SeqCst)).filter(|s| *s != 0)
+}
+
+#[cfg(all(test, not(unix)))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_request_before_install_is_not_lost() {
+        request();
+        assert_eq!(requested(), Some(LAUNCHER));
+        let (tx, rx) = std::sync::mpsc::channel();
+        install(move |sig| tx.send(sig).unwrap());
+        assert_eq!(
+            rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap(),
+            LAUNCHER
+        );
+        request();
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_millis(200)).is_err(),
+            "woken once"
+        );
+    }
 }
 
 #[cfg(all(test, unix))]

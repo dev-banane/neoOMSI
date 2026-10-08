@@ -46,11 +46,11 @@ scripts\dev-windows.cmd --map maps/Grundorf/global.cfg
 | **Dedicated server** | `scripts/build-server.sh [folder]` | `dist/server/` with `start.sh`                     |
 
 Release archives also carry the launcher ([neoOMSI/launcher](https://github.com/neoOMSI/launcher),
-Electron), built by CI from its `main` branch into `dist/<platform>/launcher`
+Electron), built by CI at the commit in `scripts/launcher-ref` into `dist/<platform>/launcher`
 (on macOS into `neoOMSI.app/Contents/Resources/launcher`). To add it to a local build (Node 24):
 
 ```sh
-bash scripts/ci/build-launcher.sh windows x64                          # its main branch
+bash scripts/ci/build-launcher.sh windows x64                          # the pinned commit
 LAUNCHER_SRC=../launcher bash scripts/ci/build-launcher.sh windows x64 # a local checkout
 ```
 

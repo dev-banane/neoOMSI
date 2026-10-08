@@ -1,8 +1,8 @@
 use crate::controllers::{self, DeviceCfg, Func};
-use crate::launcher::state::{ServerEntry, saved_servers, store_servers, with_official};
 use crate::pax_pack::{PaxPack, Status as PaxStatus};
 use anyhow::{Context, Result, anyhow};
 use omsi_launcher_lib as lib;
+use omsi_launcher_lib::servers::{self, ServerEntry};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::path::Path;
@@ -77,6 +77,26 @@ fn cached(name: &'static str, read: impl FnOnce() -> Result<Value>) -> Result<Va
     Ok(fresh)
 }
 
+static SETTINGS_FILE: Mutex<()> = Mutex::new(());
+
+fn settings_file() -> std::sync::MutexGuard<'static, ()> {
+    SETTINGS_FILE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn save_settings_with(
+    changes: &Value,
+    read: impl Fn() -> Result<Value>,
+    write: impl Fn(&Value) -> Result<()>,
+) -> Result<Value> {
+    let _file = settings_file();
+    let mut v = read()?;
+    if let (Some(v), Some(changes)) = (v.as_object_mut(), changes.as_object()) {
+        v.extend(changes.clone());
+    }
+    write(&v)?;
+    read()
+}
+
 pub(super) fn forget_content() {
     LISTS.lock().unwrap_or_else(|e| e.into_inner()).clear();
     super::minimap::forget();
@@ -137,17 +157,19 @@ pub(super) fn call(cmd: &str, a: &Value) -> Result<Value> {
         "log" => json!(lib::log_tail(n("pid").unwrap_or(0) as u32, n("lines").unwrap_or(40) as usize)?),
         "join" => lib::check_join(&s("text")),
         "settings" => {
+            let _file = settings_file();
             lib::init_settings();
             lib::get_settings()?
         }
         "save_settings" => {
-            lib::init_settings();
-            let mut v = lib::get_settings()?;
-            if let (Some(v), Some(changes)) = (v.as_object_mut(), a.as_object()) {
-                v.extend(changes.clone());
-            }
-            lib::save_settings(&v)?;
-            let saved = lib::get_settings()?;
+            let saved = save_settings_with(
+                a,
+                || {
+                    lib::init_settings();
+                    lib::get_settings()
+                },
+                lib::save_settings,
+            )?;
             if saved["pax_models"] == "realistic" {
                 with_pax(|p| {
                     if matches!(p.status(), PaxStatus::Missing | PaxStatus::Outdated) {
@@ -179,18 +201,22 @@ pub(super) fn call(cmd: &str, a: &Value) -> Result<Value> {
                 .collect(),
         ),
         "keybindings" => {
+            let _file = settings_file();
             lib::init_settings();
             lib::get_keybindings()?
         }
         "save_keybindings" => {
+            let _file = settings_file();
             lib::save_keybindings(a)?;
             lib::get_keybindings()?
         }
         "controllers" => {
+            let _file = settings_file();
             lib::init_settings();
             controllers_now()
         }
         "save_controllers" => {
+            let _file = settings_file();
             lib::init_settings();
             save_controllers(a)?;
             controllers_now()
@@ -215,7 +241,7 @@ pub(super) fn call(cmd: &str, a: &Value) -> Result<Value> {
                 servers: Vec<ServerEntry>,
             }
             let list: Args = serde_json::from_value(a.clone()).context("servers: a list of name and address")?;
-            store_servers(&with_official(list.servers))?;
+            servers::store(&servers::with_official(list.servers))?;
             json!({})
         }
         "version" => json!({ "version": crate::startup::VERSION, "protocol": lib::protocol::VERSION.parse::<u32>().unwrap_or(0) }),
@@ -276,7 +302,7 @@ pub(super) fn pax_status() -> Value {
 }
 
 fn servers() -> Value {
-    let asked: Vec<_> = saved_servers()
+    let asked: Vec<_> = servers::load()
         .into_iter()
         .map(|e| {
             let address = e.address.clone();
@@ -511,6 +537,37 @@ mod tests {
         changed.force_feedback = true;
         apply(&mut back, &changed);
         assert_eq!(back.ff_scale, Some((1.0, 0.4)));
+    }
+
+    #[test]
+    fn settings_saved_at_the_same_time_all_stay() {
+        let store = Arc::new(Mutex::new(json!({ "language": "en" })));
+        let threads: Vec<_> = (0..8)
+            .map(|k| {
+                let store = store.clone();
+                std::thread::spawn(move || {
+                    let read = || {
+                        let v = store.lock().unwrap().clone();
+                        // a slow disk: without the lock every thread reads before any writes
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                        Ok(v)
+                    };
+                    let write = |v: &Value| {
+                        *store.lock().unwrap() = v.clone();
+                        Ok(())
+                    };
+                    save_settings_with(&json!({ format!("key{k}"): k }), read, write).unwrap()
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        let saved = store.lock().unwrap().clone();
+        for k in 0..8 {
+            assert_eq!(saved[format!("key{k}")], k, "{saved}");
+        }
+        assert_eq!(saved["language"], "en");
     }
 
     #[test]

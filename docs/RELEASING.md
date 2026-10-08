@@ -23,9 +23,10 @@ local optimized builds.
 
 ## Launcher version
 
-Every build packs the launcher from the `main` branch of
-[neoOMSI/launcher](https://github.com/neoOMSI/launcher) as it is at build time; the build log
-names the commit. Launcher and engine agree on the protocol version at their handshake
+Every build packs the launcher at the full commit SHA in `scripts/launcher-ref`, a commit of
+[neoOMSI/launcher](https://github.com/neoOMSI/launcher)'s `main`; the release notes link it.
+Moving to a newer launcher is a PR of its own that changes that line, so a release can be
+rebuilt as it was. Launcher and engine agree on the protocol version at their handshake
 (`docs/LAUNCHER_PROTOCOL.md`).
 
 ## Tags
