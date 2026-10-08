@@ -52,6 +52,8 @@ fn coin_transform(bus: &VehicleInstance, rot: Mat4, parent: Option<usize>, local
     base * Mat4::from_translation(local)
 }
 
+const TRAY_SLACK: f32 = 0.05;
+
 fn ray_sphere(origin: DVec3, dir: Vec3, spread: f32, center: DVec3, radius: f32) -> Option<f32> {
     let dir = dir.normalize_or_zero();
     let to = (center - origin).as_vec3();
@@ -313,15 +315,33 @@ impl Money {
         self.placed = keep;
     }
 
-    pub fn pick(&mut self, origin: DVec3, dir: Vec3, spread: f32) -> bool {
-        let nearest = self
+    pub fn change_under(
+        &self,
+        origin: DVec3,
+        dir: Vec3,
+        spread: f32,
+        wall: impl FnOnce() -> Option<f32>,
+    ) -> Option<usize> {
+        let (k, front) = self
             .placed
             .iter()
             .enumerate()
             .filter(|(_, c)| c.change)
-            .filter_map(|(k, c)| Some((k, ray_sphere(origin, dir, spread, c.world?, c.radius)?)))
-            .min_by(|a, b| a.1.total_cmp(&b.1));
-        let Some((k, _)) = nearest else {
+            .filter_map(|(k, c)| {
+                Some((k, ray_sphere(origin, dir, spread, c.world?, c.radius)? - c.radius))
+            })
+            .min_by(|a, b| a.1.total_cmp(&b.1))?;
+        (!wall().is_some_and(|w| w < front - TRAY_SLACK)).then_some(k)
+    }
+
+    pub fn pick(
+        &mut self,
+        origin: DVec3,
+        dir: Vec3,
+        spread: f32,
+        wall: impl FnOnce() -> Option<f32>,
+    ) -> bool {
+        let Some(k) = self.change_under(origin, dir, spread, wall) else {
             return false;
         };
         let gone = self.placed.remove(k);
@@ -469,17 +489,17 @@ mod tests {
         put_at(&mut m, 12, 1, true, DVec3::new(0.005, 1.0, 0.0));
         put(&mut m, 13, 0, true, Vec3::ZERO, None);
 
-        assert!(!m.pick(DVec3::ZERO, Vec3::X, 0.0));
-        assert!(!m.pick(DVec3::ZERO, -Vec3::Y, 0.0));
-        assert!(!m.pick(DVec3::new(0.0, 0.0, 0.1), Vec3::Y, 0.0));
+        assert!(!m.pick(DVec3::ZERO, Vec3::X, 0.0, || None));
+        assert!(!m.pick(DVec3::ZERO, -Vec3::Y, 0.0, || None));
+        assert!(!m.pick(DVec3::new(0.0, 0.0, 0.1), Vec3::Y, 0.0, || None));
         assert_eq!(m.change_count(), 3);
 
-        assert!(m.pick(DVec3::ZERO, Vec3::Y, 0.0));
+        assert!(m.pick(DVec3::ZERO, Vec3::Y, 0.0, || None));
         assert_eq!(m.hidden, vec![12]);
-        assert!(m.pick(DVec3::ZERO, Vec3::Y, 0.0));
+        assert!(m.pick(DVec3::ZERO, Vec3::Y, 0.0, || None));
         assert_eq!(m.hidden, vec![12, 11]);
         assert!(
-            !m.pick(DVec3::ZERO, Vec3::Y, 0.0),
+            !m.pick(DVec3::ZERO, Vec3::Y, 0.0, || None),
             "the payment and unplaced coins stay"
         );
         assert_eq!(
@@ -489,8 +509,32 @@ mod tests {
 
         let mut wide = money();
         put_at(&mut wide, 0, 0, true, DVec3::new(0.05, 1.0, 0.0));
-        assert!(!wide.pick(DVec3::ZERO, Vec3::Y, 0.0));
-        assert!(wide.pick(DVec3::ZERO, Vec3::Y, 0.05));
+        assert!(!wide.pick(DVec3::ZERO, Vec3::Y, 0.0, || None));
+        assert!(wide.pick(DVec3::ZERO, Vec3::Y, 0.05, || None));
+    }
+
+    #[test]
+    fn a_coin_behind_the_bus_cannot_be_picked() {
+        let mut m = money();
+        put_at(&mut m, 0, 0, true, DVec3::new(0.0, 1.0, 0.0));
+        assert!(!m.pick(DVec3::ZERO, Vec3::Y, 0.0, || Some(0.5)));
+        assert_eq!(m.change_under(DVec3::ZERO, Vec3::Y, 0.0, || Some(0.5)), None);
+        assert_eq!(m.change_count(), 1);
+        assert!(
+            m.pick(DVec3::ZERO, Vec3::Y, 0.0, || Some(0.97)),
+            "the tray right under the coin does not hide it"
+        );
+
+        let mut far = money();
+        put_at(&mut far, 0, 0, true, DVec3::new(0.0, 1.0, 0.0));
+        let mut asked = false;
+        assert!(far
+            .change_under(DVec3::ZERO, Vec3::X, 0.0, || {
+                asked = true;
+                Some(0.1)
+            })
+            .is_none());
+        assert!(!asked, "no coin under the ray: the bus is not tested");
     }
 
     #[test]
@@ -504,10 +548,10 @@ mod tests {
         };
         let mut picked = tray();
         assert!((picked.change_value() - 2.5).abs() < 1e-6);
-        assert!(picked.pick(DVec3::ZERO, Vec3::Y, 0.0));
+        assert!(picked.pick(DVec3::ZERO, Vec3::Y, 0.0, || None));
         assert!((picked.change_value() - 2.0).abs() < 1e-6);
         assert_eq!(picked.change_count(), 1);
-        assert!(picked.pick(DVec3::ZERO, Vec3::Y, 0.0));
+        assert!(picked.pick(DVec3::ZERO, Vec3::Y, 0.0, || None));
 
         let mut taken = tray();
         taken.clear(true);
