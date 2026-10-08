@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 const QUIET: Duration = Duration::from_millis(1000);
+const PAX_RELEASES_EVERY: Duration = Duration::from_secs(6 * 3600);
 const INSTALLING: Duration = Duration::from_millis(250);
 
 #[derive(Clone)]
@@ -39,6 +40,14 @@ pub(crate) fn run() -> anyhow::Result<()> {
         Err(e) => log::warn!("no game link ({e}): games are seen through their files only"),
     }
     server.watch(woken);
+    let _ = std::thread::Builder::new()
+        .name("pax releases".into())
+        .spawn(|| {
+            loop {
+                crate::pax_pack::refresh();
+                std::thread::sleep(PAX_RELEASES_EVERY);
+            }
+        });
     server.serve(std::io::stdin().lock());
     log::info!("the launcher went away: the engine ends (games keep running)");
     Ok(())

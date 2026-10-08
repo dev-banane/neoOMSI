@@ -36,6 +36,7 @@ pub(super) const COMMANDS: &[&str] = &[
     "save_settings",
     "pax_pack",
     "install_pax_pack",
+    "update_check",
     "option_presets",
     "keybindings",
     "save_keybindings",
@@ -157,6 +158,16 @@ pub(super) fn call(cmd: &str, a: &Value) -> Result<Value> {
             saved
         }
         "pax_pack" => pax_status(),
+        "update_check" => match crate::updater::latest()? {
+            Some(r) => json!({
+                "version": r.version,
+                "page": r.page,
+                "notes": r.notes,
+                "prerelease": r.prerelease,
+                "size": r.size,
+            }),
+            None => Value::Null,
+        },
         "install_pax_pack" => {
             with_pax(PaxPack::start);
             pax_status()
@@ -248,7 +259,20 @@ pub(super) fn pax_status() -> Value {
         PaxStatus::Installed => ("installed", 0, 0, String::new()),
         PaxStatus::Failed(e) => ("failed", 0, 0, e),
     };
-    json!({ "state": state, "done": done, "total": total, "message": message })
+    let installed = crate::startup::content_dir()
+        .as_deref()
+        .and_then(crate::pax_pack::installed_version);
+    let latest = crate::pax_pack::latest().map(|r| {
+        json!({ "version": r.version, "notes": r.notes, "page": r.page, "published": r.published })
+    });
+    json!({
+        "state": state,
+        "done": done,
+        "total": total,
+        "message": message,
+        "installed": installed,
+        "latest": latest,
+    })
 }
 
 fn servers() -> Value {
