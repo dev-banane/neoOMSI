@@ -118,6 +118,21 @@ impl DeviceCfg {
             .unwrap_or_else(global_deadzone)
             .clamp(0.0, 0.3)
     }
+
+    pub(crate) fn stick_deadzone(&self, k: usize) -> f32 {
+        let own = self.deadzone.is_some()
+            || self
+                .calibration
+                .get(k)
+                .copied()
+                .flatten()
+                .is_some_and(|c| c.deadzone.is_some());
+        if own {
+            self.deadzone(k)
+        } else {
+            STICK_DEADZONE
+        }
+    }
 }
 
 /// A `centre` near either end (a pedal at rest) is ignored, so a pedal maps linearly.
@@ -368,6 +383,12 @@ pub fn gamepad_steering_time(sens: f32) -> f32 {
 }
 
 pub(crate) const CENTRE_SNAP: f32 = 0.03;
+
+const STICK_DEADZONE: f32 = 0.08;
+
+fn stick_deadzone(x: f32, dz: f32) -> f32 {
+    x.signum() * ((x.abs() - dz).max(0.0) / (1.0 - dz))
+}
 
 pub(crate) const ASSIGNABLE: [(&str, &str); 4] = [
     ("steering", "Steering"),
@@ -1002,17 +1023,15 @@ impl Controllers {
                                 continue;
                             }
                             steering_set_up = true;
-                            if c.gamepad && !c.ff {
+                            // (not `c.ff`: on a gilrs pad that is its rumble, and every Xbox
+                            // pad has one - set up to steer, it lost the stick's curve and
+                            // dead zone)
+                            if c.gamepad {
                                 // a pad's stick set up to steer is still a stick (#200)
-                                let x = if inverted { -v } else { v };
-                                let floor = if d.deadzone.is_some()
-                                    || d.calibration[k].is_some_and(|c| c.deadzone.is_some())
-                                {
-                                    dz
-                                } else {
-                                    dz.max(0.08)
-                                };
-                                let x = x.signum() * ((x.abs() - floor).max(0.0) / (1.0 - floor));
+                                let x = stick_deadzone(
+                                    if inverted { -v } else { v },
+                                    d.stick_deadzone(k),
+                                );
                                 if out.steering.map_or(true, |s| s.abs() < x.abs()) {
                                     out.steering = Some(x);
                                     out.stick = true;
@@ -1133,9 +1152,12 @@ impl Controllers {
                 if (di && !xinput) || self.off(pad.name()) {
                     continue;
                 }
-                let free = PadDefaults::of(find_device_cfg(&self.cfg, pad.name()));
-                let x = pad.value(Axis::LeftStickX);
-                let x = if x.abs() < 0.08 { 0.0 } else { x };
+                let cfg = find_device_cfg(&self.cfg, pad.name());
+                let free = PadDefaults::of(cfg);
+                let x = stick_deadzone(
+                    pad.value(Axis::LeftStickX),
+                    cfg.map_or(STICK_DEADZONE, |d| d.stick_deadzone(0)),
+                );
                 // A pad set up without a steering axis would otherwise not steer at all.
                 let steers = free.steering
                     && gives(0, pad.name())
@@ -1851,6 +1873,18 @@ mod tests {
         }
         assert!((gamepad_steering_time(1.0) - 1.2).abs() < 1e-6);
         assert!((gamepad_steering_time(0.25) - 2.4).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_stick_dead_zone_still_reaches_the_whole_lock() {
+        use super::{stick_deadzone, STICK_DEADZONE};
+        assert_eq!(stick_deadzone(0.05, STICK_DEADZONE), 0.0);
+        assert!(stick_deadzone(0.09, STICK_DEADZONE) < 0.02);
+        assert!((stick_deadzone(-1.0, STICK_DEADZONE) + 1.0).abs() < 1e-6);
+        let mut d = super::DeviceCfg::default();
+        assert_eq!(d.stick_deadzone(0), STICK_DEADZONE);
+        d.deadzone = Some(0.02);
+        assert_eq!(d.stick_deadzone(0), 0.02);
     }
 
     #[test]
