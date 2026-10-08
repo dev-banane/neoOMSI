@@ -744,7 +744,7 @@ impl Humans {
                 return;
             }
             if p.movement != Movement::AtTarget {
-                if self.natural && p.movement == Movement::ShortOfTarget && !open {
+                if p.movement == Movement::ShortOfTarget && !open {
                     self.pax_mut(i).unwrap().door_wait += dt;
                 }
                 self.choose_entry(i, buses, bus_ix);

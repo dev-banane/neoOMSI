@@ -2109,6 +2109,83 @@ fn aborted_boarding_releases_its_place_and_bus_reference() {
     );
 }
 
+fn timetable_bus_holds(h: &mut Humans, f: &Fixture, b: &BusNow) -> Vec<(u64, f32, bool)> {
+    h.pax_frame(
+        0.05,
+        &f.world,
+        None,
+        std::slice::from_ref(b),
+        &[(b.id, 0)].into_iter().collect(),
+        &HashMap::new(),
+        None,
+        &mut |_, _, _, _| {},
+        &mut false,
+        &mut vec![],
+    );
+    h.take_holds()
+}
+
+fn timetable_bus_at_stop(f: &Fixture, h: &mut Humans, task: Task) -> BusNow {
+    let mut b = bus(cabin());
+    b.id = BusId::Ai(7);
+    let mut origin = stop(DVec3::ZERO, 0.0, "Origin");
+    origin.buses = vec![(b.id, true)];
+    h.stops.insert(1, origin);
+    let mut p = Pax::new(1.1);
+    p.task = task;
+    p.bus = Some(b.id);
+    p.stop = Some(1);
+    h.people.push(f.person(7, State::Pax(Box::new(p)), false));
+    b
+}
+
+#[test]
+fn nobody_left_without_a_place_in_a_full_timetable_bus_holds_it() {
+    let f = Fixture::new();
+    let mut h = Humans::new(&f.root);
+    let b = timetable_bus_at_stop(&f, &mut h, Task::ToBus);
+    h.buses.seats.insert(b.id, vec![true; 3]);
+    assert!(timetable_bus_holds(&mut h, &f, &b).is_empty());
+    assert_eq!(h.pax(0).unwrap().task, Task::ToBus);
+    assert_eq!(h.pax(0).unwrap().seat, None);
+    h.stops.get_mut(&1).unwrap().buses.clear();
+    timetable_bus_holds(&mut h, &f, &b);
+    assert_eq!(h.pax(0).unwrap().task, Task::WalkingToBusstop);
+    assert_eq!(h.pax(0).unwrap().bus, None);
+}
+
+#[test]
+fn a_boarder_holds_a_timetable_bus_until_giving_up_at_a_shut_door() {
+    let f = Fixture::new();
+    let mut h = Humans::new(&f.root);
+    let mut b = timetable_bus_at_stop(&f, &mut h, Task::WalkingToBus);
+    b.entry_open[0] = false;
+    b.exit_open = vec![false; 2];
+    h.buses.seats.insert(b.id, vec![false, true, false]);
+    h.pax_mut(0).unwrap().seat = Some(1);
+    assert_eq!(timetable_bus_holds(&mut h, &f, &b), [(7, 2.5, false)]);
+    h.pax_mut(0).unwrap().door_wait = 60.0;
+    assert!(timetable_bus_holds(&mut h, &f, &b).is_empty());
+}
+
+#[test]
+fn somebody_crossing_a_doorway_holds_a_timetable_bus_as_in_the_doorway() {
+    let f = Fixture::new();
+    let mut h = Humans::new(&f.root);
+    let b = timetable_bus_at_stop(&f, &mut h, Task::InBusToExit);
+    let p = h.pax_mut(0).unwrap();
+    p.inside = Some(b.id);
+    p.door = Some(0);
+    assert_eq!(timetable_bus_holds(&mut h, &f, &b), [(7, 2.5, false)]);
+    let p = h.pax_mut(0).unwrap();
+    p.pos = DVec3::ZERO;
+    p.doorway = Some(Doorway {
+        target: Vec3::X * 10.0,
+        stop: Some(1),
+    });
+    assert_eq!(timetable_bus_holds(&mut h, &f, &b), [(7, 2.5, true)]);
+}
+
 #[test]
 fn lan_grants_preserve_journeys_and_do_not_consume_missing_metadata() {
     let f = Fixture::new();

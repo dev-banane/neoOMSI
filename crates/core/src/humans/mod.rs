@@ -1287,7 +1287,7 @@ impl Humans {
     }
 
     /// Timetable buses to hold at their stop, for the traffic.
-    pub fn take_holds(&mut self) -> Vec<(u64, f32)> {
+    pub fn take_holds(&mut self) -> Vec<(u64, f32, bool)> {
         std::mem::take(&mut self.buses.holds)
     }
 

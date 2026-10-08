@@ -192,7 +192,7 @@ fn reset_population_keeps_player_riders_and_avatars_and_releases_other_reservati
         .insert(BusId::Ai(7), (3.0, 4.0, DVec2::ZERO));
     h.buses.served_stop = Some(5);
     h.buses.ai_visits.insert(7, (5, 8.0));
-    h.buses.holds.push((7, 2.5));
+    h.buses.holds.push((7, 2.5, false));
     h.buses.ai_requests.push((7, vec![true], vec![false]));
     h.desk.desk_busy = Some(3);
     h.desk.pardons = 2;

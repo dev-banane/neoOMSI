@@ -744,8 +744,9 @@ pub(in crate::humans) struct PassengerBuses {
     pub(in crate::humans) ai_visits: HashMap<u64, (i64, f64)>,
     /// When each bus last had a door open (the passengers' clock).
     pub(in crate::humans) last_door_open: HashMap<BusId, f64>,
-    /// Timetable buses to keep at their stop for a few seconds more (for the traffic).
-    pub(in crate::humans) holds: Vec<(u64, f32)>,
+    /// Timetable buses to keep at their stop for a few seconds more (for the traffic), and
+    /// whether somebody is crossing one of its doorways.
+    pub(in crate::humans) holds: Vec<(u64, f32, bool)>,
     /// Door requests for the timetable buses' scripts: (bus, entries, exits).
     pub(in crate::humans) ai_requests: Vec<(u64, Vec<bool>, Vec<bool>)>,
     /// The buses of the last tick (for the avatars' seats and doors).

@@ -112,6 +112,7 @@ const EARLY_WAIT: f64 = 40.0;
 const LAYOVER_WAIT: f64 = 1800.0;
 /// On a layover, the doors open this long before the departure.
 const LAYOVER_BOARDING: f64 = 45.0;
+const MAX_DWELL: f32 = 90.0;
 /// Pull into the bay over this distance before the stop: the stop's docking distance,
 /// 30 m unless its object strings say otherwise (Omsi.exe 0x620058, string 4; the bus
 /// moves over once it is that near, 0x7dac5e).
@@ -211,8 +212,8 @@ impl BusService {
     }
 
     /// Somebody is still at the doors: keep them open for `secs` more.
-    pub fn hold(&mut self, secs: f32) {
-        if self.phase == Phase::Boarding {
+    pub fn hold(&mut self, secs: f32, in_doorway: bool) {
+        if self.phase == Phase::Boarding && (in_doorway || self.phase_t < MAX_DWELL) {
             self.boarding = self.boarding.max(secs);
         }
     }
@@ -566,6 +567,65 @@ mod tests {
         s.serve_early = vec![2];
         assert!(!s.must_serve(&stop(2, 200.0), 190.0));
         assert!(s.must_serve(&stop(2, 200.0), 170.0));
+    }
+
+    fn boarding_until_closed(in_doorway: impl Fn(f32) -> bool) -> f32 {
+        let dir = std::env::temp_dir().join(format!(
+            "omsi-dwell-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("test.bus"), "[model]\nmodel.cfg\n").unwrap();
+        std::fs::write(dir.join("model.cfg"), "").unwrap();
+        let ty = std::sync::Arc::new(
+            ::simulation::VehicleType::load(&dir, &dir.join("test.bus")).unwrap(),
+        );
+        let mut vehicle =
+            VehicleInstance::new(ty, ::simulation::VehicleHost::new(Default::default()));
+        std::fs::remove_dir_all(&dir).unwrap();
+        let net = Network::default();
+        let mut st = AiState::new(0, 0.0, 1);
+        let mut s = BusService::new(vec![Stop::from_tuple((0, 0.0, 0.0, 0.0, 1, 0.0))]);
+        s.phase = Phase::Boarding;
+        s.boarding = boarding_time(1);
+        let dt = 0.1;
+        let mut t = 0.0;
+        while s.phase == Phase::Boarding && t < 600.0 {
+            s.hold(2.5, in_doorway(t));
+            let ctx = Ctx {
+                net: &net,
+                way: &[],
+                day_time: t as f64,
+                dt,
+                id: 1,
+                stopped: 0.0,
+                passing: false,
+                kerb_swerve: None,
+                wanted: None,
+                debug: false,
+            };
+            s.step(&mut st, &mut vehicle, &ctx);
+            t += dt;
+        }
+        assert_eq!(s.phase, Phase::Closing);
+        t
+    }
+
+    #[test]
+    fn somebody_who_never_gets_on_holds_the_bus_only_up_to_the_max_dwell() {
+        assert!(MAX_DWELL as f64 > LAYOVER_BOARDING + 10.0);
+        let closed = boarding_until_closed(|_| false);
+        assert!(closed >= MAX_DWELL, "{closed}");
+        assert!(closed <= MAX_DWELL + 2.5 + 0.2, "{closed}");
+    }
+
+    #[test]
+    fn the_max_dwell_does_not_close_the_doors_on_somebody_in_a_doorway() {
+        let crossing_until = MAX_DWELL + 10.0;
+        let closed = boarding_until_closed(|t| t < crossing_until);
+        assert!(closed >= crossing_until, "{closed}");
+        assert!(closed <= crossing_until + 2.5 + 0.2, "{closed}");
     }
 
     #[test]
