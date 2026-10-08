@@ -1243,6 +1243,9 @@ impl App {
             }
             "end-duty" => {
                 self.duty = None;
+                if let Some(p) = self.player.as_mut() {
+                    p.vehicle.host.clear_timetable();
+                }
                 self.service_msg = Some((::i18n::translate("pause.msg.free_drive", &[]), 4.0));
                 self.close_game_menu();
             }
