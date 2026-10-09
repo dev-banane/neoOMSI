@@ -122,7 +122,7 @@ impl Ui {
             let ox = dx * e;
             if hv > 0.0 {
                 let rr = [rc[0] + ox, rc[1], rc[2] + ox, rc[3]];
-                let hc = if danger { fade(DANGER, 0.16) } else { LIT };
+                let hc = if danger { fade(DANGER, 0.1) } else { [255, 255, 255, 8] };
                 self.text.rounded(r, scene, rr, 6.0 * u, fade(hc, hv * e));
             }
             if hv > 0.0 {
