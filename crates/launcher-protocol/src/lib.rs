@@ -1,10 +1,10 @@
+pub mod api;
 pub mod link;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::io::{self, Read, Write};
 
-pub const VERSION: &str = "1";
 pub const MAX_FRAME: usize = 16 * 1024 * 1024;
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
@@ -44,7 +44,10 @@ impl Message {
 }
 
 pub fn encode(m: &Message) -> io::Result<Vec<u8>> {
-    let data = serde_json::to_vec(m)?;
+    frame(&serde_json::to_vec(m)?)
+}
+
+pub fn frame(data: &[u8]) -> io::Result<Vec<u8>> {
     if data.len() > MAX_FRAME {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -53,7 +56,7 @@ pub fn encode(m: &Message) -> io::Result<Vec<u8>> {
     }
     let mut frame = Vec::with_capacity(4 + data.len());
     frame.extend_from_slice(&(data.len() as u32).to_be_bytes());
-    frame.extend_from_slice(&data);
+    frame.extend_from_slice(data);
     Ok(frame)
 }
 
@@ -68,6 +71,15 @@ pub fn read_frame(r: &mut impl Read) -> io::Result<Option<Message>> {
 }
 
 pub fn read_frame_max(r: &mut impl Read, max: usize) -> io::Result<Option<Message>> {
+    let Some(data) = read_bytes(r, max)? else {
+        return Ok(None);
+    };
+    serde_json::from_slice(&data)
+        .map(Some)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+}
+
+pub fn read_bytes(r: &mut impl Read, max: usize) -> io::Result<Option<Vec<u8>>> {
     let mut len = [0u8; 4];
     match r.read_exact(&mut len) {
         Ok(()) => {}
@@ -83,9 +95,7 @@ pub fn read_frame_max(r: &mut impl Read, max: usize) -> io::Result<Option<Messag
     }
     let mut data = vec![0u8; len];
     r.read_exact(&mut data)?;
-    serde_json::from_slice(&data)
-        .map(Some)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+    Ok(Some(data))
 }
 
 #[cfg(test)]
@@ -113,7 +123,7 @@ mod tests {
     }
 
     #[test]
-    fn the_launchers_field_names_are_kept() {
+    fn the_envelope_keeps_its_field_names() {
         let text = String::from_utf8(encode(&Message::new("instances_changed", json!([]))).unwrap()[4..].to_vec()).unwrap();
         assert_eq!(text, r#"{"type":"instances_changed","payload":[]}"#);
         let m: Message = serde_json::from_str(r#"{"type":"handshake","requestId":"r","payload":{}}"#).unwrap();
