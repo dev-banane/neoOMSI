@@ -130,7 +130,7 @@ impl DeviceCfg {
         if own {
             self.deadzone(k)
         } else {
-            STICK_DEADZONE
+            default_stick_deadzone()
         }
     }
 }
@@ -385,6 +385,22 @@ pub fn gamepad_steering_time(sens: f32) -> f32 {
 pub(crate) const CENTRE_SNAP: f32 = 0.03;
 
 const STICK_DEADZONE: f32 = 0.08;
+
+fn default_stick_deadzone() -> f32 {
+    global_deadzone().max(STICK_DEADZONE)
+}
+
+fn ff_wheel(c: &Connected) -> bool {
+    #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+    {
+        c.ff && crate::evdev_ff::constant_force(&c.name)
+    }
+    #[cfg(not(all(target_os = "linux", target_pointer_width = "64")))]
+    {
+        let _ = c;
+        false
+    }
+}
 
 fn stick_deadzone(x: f32, dz: f32) -> f32 {
     x.signum() * ((x.abs() - dz).max(0.0) / (1.0 - dz))
@@ -1023,10 +1039,9 @@ impl Controllers {
                                 continue;
                             }
                             steering_set_up = true;
-                            // (not `c.ff`: on a gilrs pad that is its rumble, and every Xbox
-                            // pad has one - set up to steer, it lost the stick's curve and
-                            // dead zone)
-                            if c.gamepad {
+                            // (not `c.ff` alone: on a gilrs pad that is its rumble, and every
+                            // Xbox pad has one)
+                            if c.gamepad && !ff_wheel(&c) {
                                 // a pad's stick set up to steer is still a stick (#200)
                                 let x = stick_deadzone(
                                     if inverted { -v } else { v },
@@ -1156,7 +1171,7 @@ impl Controllers {
                 let free = PadDefaults::of(cfg);
                 let x = stick_deadzone(
                     pad.value(Axis::LeftStickX),
-                    cfg.map_or(STICK_DEADZONE, |d| d.stick_deadzone(0)),
+                    cfg.map_or_else(default_stick_deadzone, |d| d.stick_deadzone(0)),
                 );
                 // A pad set up without a steering axis would otherwise not steer at all.
                 let steers = free.steering
@@ -1882,7 +1897,10 @@ mod tests {
         assert!(stick_deadzone(0.09, STICK_DEADZONE) < 0.02);
         assert!((stick_deadzone(-1.0, STICK_DEADZONE) + 1.0).abs() < 1e-6);
         let mut d = super::DeviceCfg::default();
-        assert_eq!(d.stick_deadzone(0), STICK_DEADZONE);
+        assert_eq!(
+            d.stick_deadzone(0),
+            super::global_deadzone().max(STICK_DEADZONE)
+        );
         d.deadzone = Some(0.02);
         assert_eq!(d.stick_deadzone(0), 0.02);
     }
