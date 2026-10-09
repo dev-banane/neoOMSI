@@ -489,9 +489,10 @@ impl App {
         if self.lab_menu.is_none() {
             return;
         }
-        let list: Vec<String> = self.lab_entries().into_iter().map(|e| e.1).collect();
+        let (ids, list): (Vec<&'static str>, Vec<String>) = self.lab_entries().into_iter().unzip();
         if let Some(u) = self.ui.as_mut() {
             u.pause_entries = list;
+            u.pause_entry_ids = ids;
         }
     }
 
