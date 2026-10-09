@@ -22,7 +22,9 @@ events. It is the contract. The engine's Rust types are generated from it when t
 (prost, compiled by protox, so no `protoc` is needed), and the launcher keeps a copy of the file
 (`pnpm sync:engine`) from which it generates its TypeScript; the launcher's CI fails when that
 TypeScript is out of date. A protocol change is a change to the `.proto`, synced into the
-launcher.
+launcher. The game link's messages are in
+[`game_link.proto`](../crates/launcher-protocol/proto/game_link.proto) next to it: only the engine
+and the games it starts speak them, so the launcher does not copy that file.
 
 ## Framing
 
@@ -107,13 +109,14 @@ variables:
 | `OMSI_CONTROL`       | `127.0.0.1:<port>`           |
 | `OMSI_CONTROL_TOKEN` | a random token per engine    |
 
-The game connects with the same 4-byte length framing around JSON messages
-(`{type, payload}`) and sends `hello {instance, token, pid, version}`. The engine answers
-`welcome`, or `refused` and closes the connection. From then on:
+The game connects with the same 4-byte length framing, around a `FromGame` from the game and a
+`ToGame` from the engine. It sends `hello` (`GameHello`). The engine answers `welcome`, or
+`refused` with the reason and closes the connection. A hello must arrive within 5 s and be at
+most 4 KiB. From then on:
 
-- game → engine: `state {state, progress, message, window}` with `state` one of `loading` (sent
-  at most every 250 ms), `running`, `stopping` or `failed`. `window` turns true once the game's
-  window is on screen; the game brings it to the front itself at that moment;
+- game → engine: `state`, the same `GameLink` the launcher gets in `Instance.link`, with `state`
+  loading (sent at most every 250 ms), running, stopping or failed. `window` turns true once the
+  game's window is on screen; the game brings it to the front itself at that moment;
 - engine → game: `quit`. The game ends its session the way closing its window does (summary,
   personnel file, LAN goodbye).
 

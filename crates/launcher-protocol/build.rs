@@ -1,6 +1,6 @@
 fn main() {
-    println!("cargo:rerun-if-changed=proto/launcher.proto");
-    let files = protox::compile(["launcher.proto"], ["proto"]).unwrap_or_else(|e| panic!("{e:?}"));
+    println!("cargo:rerun-if-changed=proto");
+    let files = protox::compile(["launcher.proto", "game_link.proto"], ["proto"]).unwrap_or_else(|e| panic!("{e:?}"));
     let commands: Vec<String> = files
         .file
         .iter()

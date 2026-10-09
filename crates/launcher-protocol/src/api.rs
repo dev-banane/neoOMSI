@@ -1,45 +1,11 @@
-use prost::Message as _;
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
-use std::io::{self, Read};
 
 include!(concat!(env!("OUT_DIR"), "/neoomsi.launcher.rs"));
 include!(concat!(env!("OUT_DIR"), "/commands.rs"));
 
 pub const VERSION: &str = "2";
-
-pub fn encode(f: &Frame) -> io::Result<Vec<u8>> {
-    crate::frame(&f.encode_to_vec())
-}
-
-pub fn read_frame(r: &mut impl Read) -> io::Result<Option<Frame>> {
-    let Some(data) = crate::read_bytes(r, crate::MAX_FRAME)? else {
-        return Ok(None);
-    };
-    Frame::decode(data.as_slice())
-        .map(Some)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
-}
-
-impl From<crate::link::GameState> for GameLink {
-    fn from(g: crate::link::GameState) -> GameLink {
-        let state = match g.state.as_str() {
-            "starting" => GameLinkState::Starting,
-            "loading" => GameLinkState::Loading,
-            "running" => GameLinkState::Running,
-            "stopping" => GameLinkState::Stopping,
-            "failed" => GameLinkState::Failed,
-            _ => GameLinkState::Unspecified,
-        };
-        GameLink {
-            state: state.into(),
-            progress: g.progress,
-            message: g.message,
-            window: g.window,
-        }
-    }
-}
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
@@ -172,51 +138,9 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn frames_round_trip_and_split_anywhere() {
-        let a = Frame {
-            request_id: "req_1".into(),
-            body: Some(frame::Body::Request(Request {
-                command: Some(request::Command::Lines(LinesArgs {
-                    map: "maps/Spandau/global.cfg".into(),
-                    date: String::new(),
-                })),
-            })),
-            ..Default::default()
-        };
-        let b = Frame {
-            request_id: "req_1".into(),
-            error: "no OMSI 2 folder".into(),
-            body: None,
-        };
-        let mut bytes = encode(&a).unwrap();
-        bytes.extend(encode(&b).unwrap());
-        let mut r = io::Cursor::new(bytes);
-        assert_eq!(read_frame(&mut r).unwrap(), Some(a));
-        assert_eq!(read_frame(&mut r).unwrap(), Some(b));
-        assert_eq!(read_frame(&mut r).unwrap(), None);
-    }
-
-    #[test]
-    fn a_json_frame_of_the_first_protocol_is_refused() {
-        let json = crate::frame(br#"{"type":"handshake","payload":{}}"#).unwrap();
-        assert!(read_frame(&mut io::Cursor::new(json)).is_err());
-    }
-
-    #[test]
     fn the_handshake_and_shutdown_are_not_listed_as_commands() {
         assert!(!COMMANDS.contains(&"handshake") && !COMMANDS.contains(&"shutdown"));
         assert!(COMMANDS.contains(&"launch") && COMMANDS.contains(&"version"));
-    }
-
-    #[test]
-    fn a_game_link_state_keeps_its_meaning() {
-        let link = GameLink::from(crate::link::GameState {
-            state: "loading".into(),
-            progress: Some(0.25),
-            message: "Spandau".into(),
-            window: true,
-        });
-        assert_eq!((link.state(), link.progress), (GameLinkState::Loading, Some(0.25)));
     }
 
     #[test]

@@ -311,7 +311,7 @@ impl From<crate::Instance> for Instance {
             killed: i.killed,
             lan_status: i.lan_status.as_ref().map(api::lan_status),
             last_line: i.last_line,
-            link: i.link.map(Into::into),
+            link: i.link,
         }
     }
 }

@@ -3,7 +3,7 @@ mod minimap;
 mod pads;
 
 use launcher_protocol::api::{
-    self, Empty, Frame, HandshakeResponse, PaxState, SessionState, Status, StatusCode, event::Event, frame::Body,
+    self, Empty, Frame, GameLinkState, HandshakeResponse, PaxState, SessionState, Status, StatusCode, event::Event, frame::Body,
     request::Command, response::Answer,
 };
 use launcher_protocol::link;
@@ -125,7 +125,7 @@ impl Server {
     }
 
     fn send(&self, f: &Frame) {
-        let bytes = match api::encode(f) {
+        let bytes = match launcher_protocol::encode(f) {
             Ok(b) => b,
             Err(e) => {
                 log::warn!("launcher protocol: a frame not sent: {e}");
@@ -144,7 +144,7 @@ impl Server {
 
     pub(crate) fn serve(&self, mut input: impl Read) {
         loop {
-            let frame = match api::read_frame(&mut input) {
+            let frame = match launcher_protocol::read_frame::<Frame>(&mut input) {
                 Ok(Some(f)) => f,
                 Ok(None) => break,
                 Err(e) => {
@@ -411,12 +411,12 @@ fn phase_of(i: &Instance, before: Option<&Phase>, now: u64) -> Phase {
     }
     match &i.link {
         Some(l) => {
-            let state = match l.state.as_str() {
-                "loading" => SessionState::Loading,
-                "running" => SessionState::Running,
-                "stopping" => SessionState::Stopping,
-                "failed" => SessionState::Failed,
-                _ => SessionState::Starting,
+            let state = match l.state() {
+                GameLinkState::Loading => SessionState::Loading,
+                GameLinkState::Running => SessionState::Running,
+                GameLinkState::Stopping => SessionState::Stopping,
+                GameLinkState::Failed => SessionState::Failed,
+                GameLinkState::Starting | GameLinkState::Unspecified => SessionState::Starting,
             };
             phase(state, &l.message, l.progress)
         }
@@ -433,7 +433,7 @@ fn phase_of(i: &Instance, before: Option<&Phase>, now: u64) -> Phase {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use launcher_protocol::link::GameState;
+    use launcher_protocol::api::GameLink;
 
     #[derive(Clone, Default)]
     struct Shared(Arc<Mutex<Vec<u8>>>);
@@ -449,7 +449,7 @@ mod tests {
     }
 
     fn frames(f: &[Frame]) -> Vec<u8> {
-        f.iter().flat_map(|f| api::encode(f).unwrap()).collect()
+        f.iter().flat_map(|f| launcher_protocol::encode(f).unwrap()).collect()
     }
 
     fn request(id: &str, command: Option<Command>) -> Frame {
@@ -475,7 +475,7 @@ mod tests {
     fn answers(out: &Shared) -> Vec<Frame> {
         let bytes = out.0.lock().unwrap().clone();
         let mut r = std::io::Cursor::new(bytes);
-        std::iter::from_fn(|| api::read_frame(&mut r).unwrap()).collect()
+        std::iter::from_fn(|| launcher_protocol::read_frame(&mut r).unwrap()).collect()
     }
 
     fn answer_of(f: &Frame) -> &Answer {
@@ -587,8 +587,8 @@ mod tests {
         ));
         assert!(seen.update("s1", &[], std::slice::from_ref(&g)).is_empty());
 
-        g.link = Some(GameState {
-            state: "loading".into(),
+        g.link = Some(GameLink {
+            state: GameLinkState::Loading.into(),
             progress: Some(0.25),
             message: "Spandau".into(),
             window: true,
@@ -597,8 +597,8 @@ mod tests {
         let e = session_events(&m)[0];
         assert_eq!((e.state(), e.progress), (SessionState::Loading, Some(0.25)));
 
-        g.link = Some(GameState {
-            state: "failed".into(),
+        g.link = Some(GameLink {
+            state: GameLinkState::Failed.into(),
             progress: None,
             message: "the map did not load".into(),
             window: true,
