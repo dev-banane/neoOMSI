@@ -65,6 +65,7 @@ impl Ui {
             world_sub_rc: Vec::new(),
             world_scroll: 0,
             world_pos: 0.0,
+            world_held: None,
             world_bar: None,
             world_bar_grab: None,
             world_first: 0,

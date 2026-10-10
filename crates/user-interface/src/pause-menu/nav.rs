@@ -24,12 +24,10 @@ impl Ui {
         m: Metrics,
         tab: usize,
     ) -> f32 {
-        let Metrics { w, u, mx, line, .. } = m;
+        let Metrics { w, u, mx, .. } = m;
         self.lab_tabs.clear();
         let bar_h = (56.0 * u).round();
         self.text.rounded(r, scene, [0.0, 0.0, w, bar_h], 0.0, [0, 0, 0, 200]);
-        self.text
-            .rounded(r, scene, [0.0, bar_h, w, bar_h + line], 0.0, BORDER);
         self.ensure_logo();
         if let Some((tex, iw, ih)) = self.logo_at(r, scene, (bar_h * 0.46).round()) {
             let (lw, lh) = (iw as f32, ih as f32);

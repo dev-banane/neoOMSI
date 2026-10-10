@@ -249,6 +249,7 @@ impl App {
             u.world_group = g;
             u.world_sub = 0;
             u.world_scroll = 0;
+            self.key_filter.clear();
             return;
         }
         if let Some(i) = hit(&u.world_sub_rc) {
@@ -261,6 +262,7 @@ impl App {
                 (u.world_sub + 1).min(tabs - 1)
             };
             u.world_scroll = 0;
+            self.key_filter.clear();
             return;
         }
         let Some(i) = hit(&u.world_rows_rc) else {

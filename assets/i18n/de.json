@@ -969,6 +969,24 @@
       "button": {
         "name": "Taste",
         "desc": "Was diese Taste bewirkt."
+      },
+      "pressed": "Gedrückt",
+      "find_hint": "Drücke eine Taste am Controller, um sie hier zu finden",
+      "button_search": "Tasten suchen",
+      "no_match": "Keine Taste passt zu „{query}“",
+      "pad": {
+        "view": "Ansicht",
+        "menu": "Menü",
+        "left_stick": "Linker Stick (drücken)",
+        "right_stick": "Rechter Stick (drücken)"
+      },
+      "hat": {
+        "up": "oben",
+        "right": "rechts",
+        "down": "unten",
+        "left": "links",
+        "dpad": "Steuerkreuz {dir}",
+        "hat": "Coolie-Hat {n} {dir}"
       }
     },
     "dialog": {

@@ -969,6 +969,24 @@
       "button": {
         "name": "Button",
         "desc": "What this button does."
+      },
+      "pressed": "Pressed",
+      "find_hint": "Press a button on the controller to find it here",
+      "button_search": "Search buttons",
+      "no_match": "No button matches “{query}”",
+      "pad": {
+        "view": "View",
+        "menu": "Menu",
+        "left_stick": "Left stick (press)",
+        "right_stick": "Right stick (press)"
+      },
+      "hat": {
+        "up": "up",
+        "right": "right",
+        "down": "down",
+        "left": "left",
+        "dpad": "D-pad {dir}",
+        "hat": "Hat {n} {dir}"
       }
     },
     "dialog": {

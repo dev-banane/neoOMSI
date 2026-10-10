@@ -116,6 +116,7 @@ pub struct Ui {
     pub world_sub_rc: Vec<[f32; 4]>,
     pub world_scroll: usize,
     pub world_pos: f32,
+    world_held: Option<usize>,
     pub world_bar: Option<([f32; 4], [f32; 4])>,
     pub world_bar_grab: Option<f32>,
     pub world_first: usize,
