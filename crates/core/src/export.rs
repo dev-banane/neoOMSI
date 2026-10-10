@@ -38,8 +38,8 @@ pub fn export_glb(
         let folders = dirs.iter().map(|d| d.to_string_lossy()).collect::<Vec<_>>().join("|");
         (subst, dirs, folders)
     };
-    // textures by (lower-case) file name → (png bytes, has alpha)
-    let mut images: Vec<(Vec<u8>, bool)> = Vec::new();
+    // textures by (lower-case) file name → (encoded image, has alpha, its type)
+    let mut images: Vec<(Vec<u8>, bool, &str)> = Vec::new();
     let mut image_index: HashMap<String, Option<usize>> = HashMap::new();
     let mut materials: Vec<(Option<usize>, bool, [f32; 4])> = Vec::new(); // (image, blended, colour)
     let mut material_names: Vec<String> = Vec::new();
@@ -124,17 +124,9 @@ pub fn export_glb(
                                 None => {
                                     let found =
                                         textures.get(&tex_name, &dirs_all).and_then(|img| {
-                                            let mut png = Vec::new();
-                                            let enc = image::codecs::png::PngEncoder::new(&mut png);
-                                            use image::ImageEncoder;
-                                            enc.write_image(
-                                                &img.rgba,
-                                                img.width,
-                                                img.height,
-                                                image::ExtendedColorType::Rgba8,
-                                            )
-                                            .ok()?;
-                                            images.push((png, img.has_alpha));
+                                            let (bytes, mime) =
+                                                preview_image(&img.rgba, img.width, img.height, img.has_alpha)?;
+                                            images.push((bytes, img.has_alpha, mime));
                                             Some(images.len() - 1)
                                         });
                                     image_index.insert(image_key, found);
@@ -265,9 +257,9 @@ pub fn export_glb(
         meshes.push(serde_json::json!({ "name": p.name, "primitives": [{ "attributes": { "POSITION": a_pos, "NORMAL": a_nrm, "TEXCOORD_0": a_uv }, "indices": a_idx, "material": p.material }] }));
     }
     let mut gltf_images = Vec::new();
-    for (png, _) in &images {
-        let v = push_view(&mut bin, png, None);
-        gltf_images.push(serde_json::json!({ "bufferView": v, "mimeType": "image/png" }));
+    for (bytes, _, mime) in &images {
+        let v = push_view(&mut bin, bytes, None);
+        gltf_images.push(serde_json::json!({ "bufferView": v, "mimeType": mime }));
     }
     let gltf_textures: Vec<serde_json::Value> = (0..images.len())
         .map(|i| serde_json::json!({ "source": i, "sampler": 0 }))
@@ -336,6 +328,34 @@ pub fn export_glb(
         file.len() as f64 / 1e6
     );
     Ok(())
+}
+
+const PREVIEW_SIZE: u32 = 1024;
+
+fn preview_image(rgba: &[u8], width: u32, height: u32, alpha: bool) -> Option<(Vec<u8>, &'static str)> {
+    use image::ImageEncoder;
+    let mut img = image::RgbaImage::from_raw(width, height, rgba.to_vec())?;
+    let longest = width.max(height);
+    if longest > PREVIEW_SIZE {
+        let scale = PREVIEW_SIZE as f32 / longest as f32;
+        let (w, h) = (
+            ((width as f32 * scale).round() as u32).max(1),
+            ((height as f32 * scale).round() as u32).max(1),
+        );
+        img = image::imageops::resize(&img, w, h, image::imageops::FilterType::Triangle);
+    }
+    let mut out = Vec::new();
+    if alpha {
+        image::codecs::png::PngEncoder::new(&mut out)
+            .write_image(&img, img.width(), img.height(), image::ExtendedColorType::Rgba8)
+            .ok()?;
+        return Some((out, "image/png"));
+    }
+    let rgb = image::DynamicImage::ImageRgba8(img).into_rgb8();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 88)
+        .write_image(&rgb, rgb.width(), rgb.height(), image::ExtendedColorType::Rgb8)
+        .ok()?;
+    Some((out, "image/jpeg"))
 }
 
 fn bytemuck_cast(v: &[[f32; 3]]) -> &[u8] {
