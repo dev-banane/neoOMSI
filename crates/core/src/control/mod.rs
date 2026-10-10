@@ -39,6 +39,9 @@ pub(crate) fn run() -> anyhow::Result<()> {
     omsi_launcher_lib::init_settings();
     omsi_launcher_lib::cleanup();
     crate::updater::cleanup_after_update();
+    if let Some(message) = crate::updater::take_failure() {
+        commands::update_failed(message);
+    }
     let _ = crate::updater::just_updated();
     let (server, woken) = Server::new(Box::new(out));
     let s = server.clone();

@@ -181,6 +181,7 @@ pub(super) fn call(command: Command) -> Result<Answer> {
         }
         Command::UpdateCheck(_) => Answer::UpdateCheck(api::UpdateCheck {
             release: crate::updater::latest()?.as_ref().map(game_release),
+            update: Some(update_status()),
         }),
         Command::InstallUpdate(a) => {
             if a.launcher_pid == 0 {
@@ -278,6 +279,10 @@ static UPDATER: LazyLock<Mutex<Updater>> = LazyLock::new(Default::default);
 
 fn updater() -> std::sync::MutexGuard<'static, Updater> {
     UPDATER.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+pub(super) fn update_failed(message: String) {
+    updater().fail(message);
 }
 
 fn game_release(r: &Release) -> api::GameRelease {

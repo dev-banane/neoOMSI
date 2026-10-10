@@ -196,6 +196,10 @@ impl Updater {
         }
     }
 
+    pub fn fail(&mut self, message: String) {
+        self.set(Status::Failed(message));
+    }
+
     /// Forget a failure or an offer (the dialog's "Close" / "Not now").
     pub fn dismiss(&mut self) {
         self.dismissed = true;
@@ -566,13 +570,21 @@ pub fn finish_update(args: &[String]) -> anyhow::Result<()> {
         anyhow::bail!("{FINISH_UPDATE} <archive> <version> <launcher pid>");
     };
     let launcher: u32 = launcher.parse()?;
+    let zip = Path::new(zip);
     let start = std::time::Instant::now();
     while omsi_launcher_lib::install::pid_alive(launcher) && start.elapsed().as_secs() < 60 {
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
+    // (its files are still in use, and starting neoOMSI again would only bring it to the front)
+    if omsi_launcher_lib::install::pid_alive(launcher) {
+        let e = anyhow::anyhow!("the launcher did not close within a minute; close it and update again");
+        log::error!("update to {version}: {e}");
+        note_failure(version, &e);
+        let _ = std::fs::remove_file(zip);
+        return Err(e);
+    }
     log::info!("update to {version}: the launcher ended after {:.1} s", start.elapsed().as_secs_f32());
     let place = install_place()?;
-    let zip = Path::new(zip);
     // (Windows lets go of a program's folder a moment after the program has ended)
     let mut result = install_archive(zip, &place);
     for _ in 0..10 {
@@ -581,15 +593,36 @@ pub fn finish_update(args: &[String]) -> anyhow::Result<()> {
         std::thread::sleep(std::time::Duration::from_secs(1));
         result = install_archive(zip, &place);
     }
+    let _ = std::fs::remove_file(zip);
     match &result {
         Ok(()) => {
             let _ = std::fs::write(download_dir().join("updating-to"), version);
-            let _ = std::fs::remove_file(zip);
         }
-        Err(e) => log::error!("update to {version}: {e:#}; the installed version starts again"),
+        Err(e) => {
+            log::error!("update to {version}: {e:#}; the installed version starts again");
+            note_failure(version, e);
+        }
     }
     relaunch(&place)?;
     result
+}
+
+const FAILED_NOTE: &str = "update-failed";
+
+/// Kept for the next start to tell the player: the helper has no window of its own.
+fn note_failure(version: &str, e: &anyhow::Error) {
+    let _ = std::fs::write(
+        download_dir().join(FAILED_NOTE),
+        format!("neoOMSI was not updated to {version}: {e}"),
+    );
+}
+
+/// Why the last update did not go in, once.
+pub fn take_failure() -> Option<String> {
+    let p = download_dir().join(FAILED_NOTE);
+    let message = std::fs::read_to_string(&p).ok()?;
+    let _ = std::fs::remove_file(&p);
+    Some(message.trim().to_string()).filter(|m| !m.is_empty())
 }
 
 // --- installing on a computer -----------------------------------------------------------------
