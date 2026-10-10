@@ -1,5 +1,5 @@
 use crate::game_lists::*;
-use crate::ui::{OptGroup, OptKind, OptRow, OptShow, OPTION_GROUPS};
+use crate::ui::{Fmt, OptGroup, OptKind, OptRow, OptShow, OPTION_GROUPS};
 use crate::App;
 
 fn shown(app: &App, show: OptShow) -> bool {
@@ -20,8 +20,53 @@ fn row_of(app: &App, file: &std::sync::Arc<serde_json::Value>, r: &OptRow) -> Op
         OptKind::Preset => preset_row(r.name, r.desc),
         OptKind::Opens => Some(opens(r.name, r.desc, r.id)),
         OptKind::Button(text) => Some(button(r.name, text, r.desc, r.id)),
-        OptKind::Keybinds | OptKind::Pads => None,
+        OptKind::Mic => Some(mic_row(app, r)),
+        OptKind::Keybinds | OptKind::Pads | OptKind::VoicePlayers => None,
     }
+}
+
+fn mic_row(app: &App, r: &OptRow) -> (String, String) {
+    let mic = ::config::get_string("voice", "mic")
+        .filter(|m| !m.is_empty())
+        .unwrap_or_else(|| "pause.options.voice.mic.default".into());
+    let level = app.voice.level();
+    let desc = match (&app.voice.error, level) {
+        (Some(e), _) => e.as_str(),
+        (None, Some(_)) => r.desc,
+        (None, None) => "pause.options.voice.mic.off",
+    };
+    let mut text = row(r.name, 'o', &mic, desc, None);
+    if let Some(level) = level {
+        let lit = if app.voice.sending().is_some() { "1" } else { "" };
+        text = format!("{text}\u{1f}\u{1f}{level:.3}\u{1f}u\u{1f}{lit}");
+    }
+    (text, r.id.to_string())
+}
+
+fn voice_player_rows(app: &App, r: &OptRow) -> Vec<(String, String)> {
+    let Some(lan) = app.lan.as_ref() else {
+        return Vec::new();
+    };
+    let mut peers: Vec<(String, u32)> = lan
+        .peers()
+        .filter(|p| p.pose.id != lan.my_id)
+        .map(|p| (p.pose.name.clone(), p.pose.id))
+        .collect();
+    peers.sort();
+    let muted = tk("pause.options.voice.pvol.muted", "muted");
+    peers
+        .into_iter()
+        .filter_map(|(name, id)| {
+            let name = if name.is_empty() {
+                ::i18n::translate("pause.admin.player", &[("id", &id)])
+            } else {
+                name
+            };
+            slider_row(app, &format!("{} {id}", r.id), &name, r.desc, &|v| {
+                if v <= 0.0 { muted.clone() } else { Fmt::Pct.apply(v) }
+            })
+        })
+        .collect()
 }
 
 fn tk(key: &str, fallback: &str) -> String {
@@ -105,6 +150,7 @@ fn rows_of(app: &App, file: &std::sync::Arc<serde_json::Value>, rows: &[OptRow])
         .flat_map(|r| match r.kind {
             OptKind::Keybinds => key_rows(app).into_iter().map(retag).collect(),
             OptKind::Pads => crate::lab_pads::rows(app),
+            OptKind::VoicePlayers => voice_player_rows(app, r),
             _ => row_of(app, file, r).into_iter().collect(),
         })
         .collect()
