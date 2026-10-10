@@ -25,6 +25,7 @@ pub(crate) struct VoiceChat {
     speakers: hashbrown::HashMap<u32, Speaker>,
     pub(crate) volume: hashbrown::HashMap<u32, f32>,
     pub(crate) testing: bool,
+    volume_session: Option<u64>,
 }
 
 impl VoiceChat {
@@ -46,6 +47,15 @@ impl VoiceChat {
 
     pub(crate) fn level(&self) -> Option<f32> {
         self.mic.as_ref().map(|m| m.level())
+    }
+
+    /// Player ids are handed out again in the next session, so the volumes set for the
+    /// players of one session are forgotten when it ends or another one begins.
+    fn in_session(&mut self, session: Option<u64>) {
+        if self.volume_session != session {
+            self.volume.clear();
+            self.volume_session = session;
+        }
     }
 
     fn silence(&mut self, audio: Option<&audio::AudioEngine>) {
@@ -192,6 +202,7 @@ impl App {
             .as_mut()
             .map(|l| l.take_voice())
             .unwrap_or_default();
+        self.voice.in_session(self.lan.as_ref().map(|l| l.session));
         if !on || self.lan.is_none() {
             self.voice.silence(self.audio.as_ref());
         }
@@ -353,7 +364,21 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::{proximity, through};
+    use super::{VoiceChat, proximity, through};
+
+    #[test]
+    fn player_volumes_do_not_outlive_their_session() {
+        let mut v = VoiceChat::default();
+        v.in_session(Some(7));
+        v.volume.insert(2, 0.0);
+        v.in_session(Some(7));
+        assert_eq!(v.volume.get(&2), Some(&0.0));
+        v.in_session(None);
+        assert!(v.volume.is_empty());
+        v.volume.insert(2, 0.0);
+        v.in_session(Some(8));
+        assert!(v.volume.is_empty());
+    }
 
     #[test]
     fn a_voice_carries_across_a_stop_and_is_faint_near_the_range() {
