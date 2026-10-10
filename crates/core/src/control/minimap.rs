@@ -79,7 +79,7 @@ fn trip_routes(
     world: &World,
     net: &::simulation::traffic::Network,
     date: &str,
-) -> (Vec<MinimapLane>, HashMap<String, MinimapTrip>) {
+) -> (Vec<MinimapLane>, HashMap<String, MinimapTrip>, Vec<usize>, HashSet<String>) {
     let mut clock = ::simulation::SimClock::default();
     let ymd: Vec<i32> = date.split('-').filter_map(|x| x.trim().parse().ok()).collect();
     if let [y, m, d] = ymd[..] {
@@ -89,10 +89,14 @@ fn trip_routes(
     let mut lanes = Vec::new();
     let mut placed: HashMap<usize, u32> = HashMap::new();
     let mut trips = HashMap::new();
+    let mut trains = HashSet::new();
     for trip in &schedule.data.trips {
         let route = schedule.trip_route_in(net, &trip.name);
         if route.is_empty() {
             continue;
+        }
+        if route.iter().all(|&l| net.lanes[l].kind == ::simulation::traffic::LaneKind::Rail) {
+            trains.insert(trip.name.clone());
         }
         let ids = route
             .into_iter()
@@ -107,7 +111,7 @@ fn trip_routes(
             .collect();
         trips.insert(trip.name.clone(), MinimapTrip { lanes: ids });
     }
-    (lanes, trips)
+    (lanes, trips, placed.into_keys().collect(), trains)
 }
 
 fn build(map: &str, date: &str) -> Result<Minimap> {
@@ -127,6 +131,10 @@ fn build(map: &str, date: &str) -> Result<Minimap> {
     };
     net.link(1.5);
     confirm_road_surfaces(&mut net, &nav.road_surfaces);
+    let (lanes, trips, driven, trains) = trip_routes(&root, &world, &net, date);
+    for l in driven {
+        net.lanes[l].invisible = false;
+    }
     let roads: Vec<MinimapRoad> = road_geometry(&net)
         .into_iter()
         .map(|r| MinimapRoad {
@@ -137,22 +145,38 @@ fn build(map: &str, date: &str) -> Result<Minimap> {
         })
         .collect();
 
-    let positions = world.object_positions.lock().clone();
     let chrono = world.chrono_dirs.read().clone();
     let off = ::map::chrono_deactivated_lines(&chrono);
     let tt = ::timetable::TimetableData::load_with_chrono(&world.map_dir, &chrono, &off);
     let mut seen = HashSet::new();
-    let stops: Vec<MinimapStop> = tt
+    // Busstops.cfg is the editor's list and may hold a few of them only: the trips name every
+    // stop they serve, by object id, tile and name
+    let named = tt
         .bus_stops
         .iter()
-        .filter(|b| seen.insert(b.object_id))
-        .filter_map(|b| {
-            let (p, rot) = positions.get(&b.object_id)?;
+        .map(|b| (b.object_id, b.group, b.name.trim()))
+        .chain(tt.trips.iter().flat_map(|t| &t.stations_legacy).filter_map(|s| {
+            Some((s.first()?.trim().parse().ok()?, s.get(3)?.trim().parse().ok()?, s.get(2)?.trim()))
+        }));
+    let (mut by_bus, mut by_train) = (HashSet::new(), HashSet::new());
+    for t in &tt.trips {
+        let ids = t
+            .stations
+            .iter()
+            .copied()
+            .chain(t.stations_legacy.iter().filter_map(|s| s.first()?.trim().parse().ok()));
+        if trains.contains(&t.name) { by_train.extend(ids) } else { by_bus.extend(ids) }
+    }
+    let stops: Vec<MinimapStop> = named
+        .filter(|(id, _, _)| by_bus.contains(id) || !by_train.contains(id))
+        .filter(|(id, tile, _)| seen.insert((*id, *tile)))
+        .filter_map(|(id, tile, name)| {
+            let (p, rot) = world.object_on_tile(tile, id)?;
             let h = rot[0].to_radians();
-            let back = *p - DVec3::new(h.sin(), h.cos(), 0.0) * BEFORE_STOP;
+            let back = p - DVec3::new(h.sin(), h.cos(), 0.0) * BEFORE_STOP;
             Some(MinimapStop {
-                id: b.object_id,
-                name: b.name.trim().to_string(),
+                id,
+                name: name.to_string(),
                 x: round(p.x),
                 y: round(p.y),
                 spawn: spawn(back, rot[0]),
@@ -186,7 +210,6 @@ fn build(map: &str, date: &str) -> Result<Minimap> {
         })
         .collect();
 
-    let (lanes, trips) = trip_routes(&root, &world, &net, date);
     log::info!(
         "minimap of {map}: {} roads, {} stops, {} entry points, {} trips on {} lanes in {:.1} s",
         roads.len(),
