@@ -7,8 +7,8 @@ use glam::DVec3;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-const NEAR: f32 = 2.0;
-const FADE: f64 = 0.15;
+const NEAR: f64 = 5.0;
+const BOOST: f32 = 1.5;
 
 struct Speaker {
     talker: Arc<Talker>,
@@ -80,12 +80,17 @@ fn prefs() -> Prefs {
     }
 }
 
+pub(crate) fn proximity(d: f64, range: f64) -> f32 {
+    let t = ((d - NEAR) / (range - NEAR).max(1.0)).clamp(0.0, 1.0);
+    (1.0 - t).powf(1.5) as f32
+}
+
 pub(crate) fn through(open: &[f32]) -> (f32, f32) {
     open.iter().fold((1.0, 0.0), |(g, lp), o| {
         let o = o.clamp(0.0, 1.0);
-        let wall = 1100.0 + 4000.0 * o;
-        let lp = if lp == 0.0 { wall } else { lp.min(wall) * 0.7 };
-        (g * (0.4 + 0.5 * o), lp)
+        let wall = 7000.0 + 8000.0 * o;
+        let lp = if lp == 0.0 { wall } else { lp.min(wall) * 0.9 };
+        (g * (0.95 + 0.05 * o), lp)
     })
 }
 
@@ -234,7 +239,7 @@ impl App {
             self.inside_remote
         };
         for (id, s) in &self.voice.speakers {
-            let gain = prefs.volume * self.voice.volume(*id);
+            let gain = BOOST * prefs.volume * self.voice.volume(*id);
             let params = if s.talker.radio() {
                 VoiceParams {
                     gain,
@@ -246,7 +251,7 @@ impl App {
                 match self.spot_of(*id, my_id) {
                     Some(spot) => {
                         let d = (spot.at - ear).length();
-                        let fade = ((range - d) / (range * FADE)).clamp(0.0, 1.0) as f32;
+                        let fade = proximity(d, range);
                         let open: Vec<f32> = if spot.bus == my_bus {
                             Vec::new()
                         } else {
@@ -260,7 +265,7 @@ impl App {
                         VoiceParams {
                             gain: gain * fade * wall,
                             position: Some(spot.at.as_vec3()),
-                            range: NEAR,
+                            range: range as f32,
                             lowpass_hz,
                             doppler: false,
                             important: true,
@@ -348,15 +353,24 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::through;
+    use super::{proximity, through};
+
+    #[test]
+    fn a_voice_carries_across_a_stop_and_is_faint_near_the_range() {
+        assert_eq!(proximity(3.0, 60.0), 1.0);
+        assert!(proximity(20.0, 60.0) > 0.5);
+        let far = proximity(50.0, 60.0);
+        assert!(far > 0.0 && far < 0.12, "{far}");
+        assert_eq!(proximity(60.0, 60.0), 0.0);
+    }
 
     #[test]
     fn bodywork_muffles_less_with_the_doors_open() {
         assert_eq!(through(&[]), (1.0, 0.0));
         let (shut, shut_lp) = through(&[0.0]);
         let (open, open_lp) = through(&[1.0]);
-        assert!((shut - 0.4).abs() < 1e-6 && shut_lp < 1500.0);
-        assert!(open > 0.8 && open_lp > 4000.0);
+        assert!((shut - 0.95).abs() < 1e-6 && shut_lp < 8000.0);
+        assert!(open > 0.99 && open_lp > 12000.0);
         let (two, two_lp) = through(&[0.0, 0.0]);
         assert!(two < shut && two_lp < shut_lp);
     }

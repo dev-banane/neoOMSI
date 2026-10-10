@@ -180,12 +180,15 @@ struct RadioTone {
     hp: (f32, f32),
     lp: [f32; 2],
     noise: u32,
+    crackle: u32,
+    hiss: f32,
 }
 
 impl RadioTone {
     fn apply(&mut self, pcm: &mut [f32]) {
         let hp_a = (-2.0 * std::f32::consts::PI * 350.0 / RATE as f32).exp();
         let lp_a = 1.0 - (-2.0 * std::f32::consts::PI * 2800.0 / RATE as f32).exp();
+        let hiss_a = 1.0 - (-2.0 * std::f32::consts::PI * 2000.0 / RATE as f32).exp();
         for x in pcm {
             let hp = hp_a * (self.hp.1 + *x - self.hp.0);
             self.hp = (*x, hp);
@@ -194,7 +197,16 @@ impl RadioTone {
             self.noise ^= self.noise << 13;
             self.noise ^= self.noise >> 17;
             self.noise ^= self.noise << 5;
-            let hiss = (self.noise as f32 / u32::MAX as f32 - 0.5) * 0.012;
+            let r = self.noise as f32 / u32::MAX as f32;
+            let mut white = (r - 0.5) * 0.06;
+            if self.crackle > 0 {
+                self.crackle -= 1;
+                white *= 3.0;
+            } else if r < 0.0002 {
+                self.crackle = 60 + self.noise % 400;
+            }
+            self.hiss += (white - self.hiss) * hiss_a;
+            let hiss = self.hiss;
             *x = (self.lp[1] * 2.2).tanh() * 0.8 + hiss;
         }
     }
