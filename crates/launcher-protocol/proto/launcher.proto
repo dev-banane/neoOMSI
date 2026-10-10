@@ -54,6 +54,7 @@ message Request {
     Empty servers = 38;
     SaveServersArgs save_servers = 39;
     Empty version = 40;
+    InstallUpdateArgs install_update = 41;
   }
 }
 
@@ -99,6 +100,7 @@ message Response {
     ServerList servers = 38;
     Empty save_servers = 39;
     EngineVersion version = 40;
+    GameUpdate install_update = 41;
   }
 }
 
@@ -109,6 +111,7 @@ message Event {
     ContentChanged content_changed = 3;
     SessionEvent session_event = 4;
     PaxPack pax_pack_changed = 5;
+    GameUpdate update_changed = 6;
   }
 }
 
@@ -289,11 +292,22 @@ message MinimapEntry {
 }
 
 // In world metres.
+message MinimapLane {
+  repeated Point points = 1;
+}
+
+// the lanes a trip drives, in order, by their place in `lanes`
+message MinimapTrip {
+  repeated uint32 lanes = 1;
+}
+
 message Minimap {
   string map = 1;
   repeated MinimapRoad roads = 2;
   repeated MinimapStop stops = 3;
   repeated MinimapEntry entries = 4;
+  repeated MinimapLane lanes = 5;
+  map<string, MinimapTrip> trips = 6;
 }
 
 message IbisArgs {
@@ -814,6 +828,7 @@ message Settings {
   optional bool update_auto = 117;
   // read only: the texture memory "automatic" stands for on this machine, in MB
   optional uint32 texture_memory_auto = 118;
+  optional double head_pitch = 119;
 }
 
 message OptionPreset {
@@ -861,6 +876,27 @@ message GameRelease {
 
 message UpdateCheck {
   GameRelease release = 1;
+  GameUpdate update = 2;
+}
+
+message InstallUpdateArgs {
+  uint32 launcher_pid = 1;
+}
+
+enum UpdateState {
+  UPDATE_STATE_UNSPECIFIED = 0;
+  UPDATE_STATE_IDLE = 1;
+  UPDATE_STATE_DOWNLOADING = 2;
+  UPDATE_STATE_RESTARTING = 3;
+  UPDATE_STATE_FAILED = 4;
+}
+
+message GameUpdate {
+  UpdateState state = 1;
+  GameRelease release = 2;
+  uint64 done = 3;
+  uint64 total = 4;
+  string message = 5;
 }
 
 message KeyBinding {
