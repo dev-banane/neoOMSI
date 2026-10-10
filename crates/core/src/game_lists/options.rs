@@ -13,7 +13,7 @@ pub(crate) fn next_step<T: PartialOrd + Copy>(steps: &[T], now: T) -> T {
     steps.iter().copied().find(|s| *s > now).unwrap_or(steps[0])
 }
 
-pub(super) fn steps_of(verb: &str) -> Option<Vec<f32>> {
+pub(crate) fn steps_of(verb: &str) -> Option<Vec<f32>> {
     Some(match verb {
         "vr_nav_x" | "vr_nav_y" | "vr_nav_z" => (-100..=100).map(|v| v as f32 * 0.02).collect(),
         "vr_nav_width" => (12..=65).map(|v| v as f32 * 0.01).collect(),
@@ -158,8 +158,9 @@ pub(super) fn step_move(steps: &[f32], now: f32, mv: Move) -> f32 {
     steps.get(to).copied().unwrap_or(now)
 }
 
-pub(super) fn option_now(app: &App, verb: &str, arg: &str) -> Option<f32> {
+pub(crate) fn option_now(app: Option<&App>, verb: &str, arg: &str) -> Option<f32> {
     if let Some(field) = verb.strip_prefix("vr_nav_") {
+        let app = app?;
         return if app.vr_active() && app.player.is_some() {
             app.vr_nav_profile().value(field)
         } else {
@@ -168,7 +169,7 @@ pub(super) fn option_now(app: &App, verb: &str, arg: &str) -> Option<f32> {
     }
     Some(match verb {
         "speed" => ::config::get_float("gameplay", "time_speed").unwrap_or(1.0) as f32,
-        "traffic" => app.traffic.as_ref()?.target as f32,
+        "traffic" => app?.traffic.as_ref()?.target as f32,
         "pax" => ::config::get_float("passengers", "density").unwrap_or(1.0) as f32,
         "volume" => ::config::get_float("audio", "master-volume").unwrap_or(1.0) as f32,
         "led_glow" => ::config::get_int("graphics", "led_glow").unwrap_or(6) as u8 as f32,
@@ -190,7 +191,7 @@ pub(super) fn option_now(app: &App, verb: &str, arg: &str) -> Option<f32> {
         "vol_voice" => ::config::get_float("voice", "volume").unwrap_or(1.0) as f32,
         "voice_sensitivity" => ::config::get_float("voice", "sensitivity").unwrap_or(0.5) as f32,
         "mic_gain" => ::config::get_float("voice", "mic_gain").unwrap_or(1.0) as f32,
-        "pvol" => app
+        "pvol" => app?
             .voice
             .volume
             .get(&arg.trim().parse::<u32>().ok()?)
@@ -218,44 +219,38 @@ pub(super) fn option_now(app: &App, verb: &str, arg: &str) -> Option<f32> {
         "triple_screen_eye_height_mm" => {
             ::config::get_float("graphics", "triple_screen_eye_height_mm").unwrap_or(0.0) as f32
         }
-        "steer_look_angle" => {
-            ::config::get_float("camera", "steer_look_angle").unwrap_or(30.0) as f32
-        }
-        "steer_look_response" => {
-            ::config::get_float("camera", "steer_look_response").unwrap_or(0.25) as f32
-        }
-        "seat" => ["seat_x", "seat_y", "seat_z"]
-            .map(|k| ::config::get_float("camera", k).unwrap_or(0.0) as f32)
-            [arg.trim().parse::<usize>().unwrap_or(0).min(2)],
-        "hour" => ((app.clock.time / 3600.0) as i64).rem_euclid(24) as f32,
-        "minute" => (((app.clock.time / 60.0) as i64) % 60) as f32,
-        "visibility" => app.weather.as_ref()?.fog.0,
+        "steer_look_angle" => ::config::get_float("camera", "steer_look_angle").unwrap_or(30.0) as f32,
+        "steer_look_response" => ::config::get_float("camera", "steer_look_response").unwrap_or(0.25) as f32,
+        "seat" => ["seat_x", "seat_y", "seat_z"].map(|k| ::config::get_float("camera", k).unwrap_or(0.0) as f32)[arg.trim().parse::<usize>().unwrap_or(0).min(2)],
+        "hour" => ((app?.clock.time / 3600.0) as i64).rem_euclid(24) as f32,
+        "minute" => (((app?.clock.time / 60.0) as i64) % 60) as f32,
+        "visibility" => app?.weather.as_ref()?.fog.0,
         "rain_amt" => {
-            let w = app.weather.as_ref()?;
+            let w = app?.weather.as_ref()?;
             if w.precip.first().copied().unwrap_or(0.0) < 0.5 {
                 0.0
             } else {
                 (w.precip.get(1).copied().unwrap_or(0.0) / 255.0).clamp(0.0, 1.0)
             }
         }
-        "wet" => app.wetness,
-        "brightness" => custom_state(app).brightness,
-        "humidity" => custom_state(app).humidity,
-        "temp" => app.weather.as_ref()?.temp.0,
-        "wind_speed" => app.weather.as_ref()?.wind.1,
-        "wind_dir" => app.weather.as_ref()?.wind.0.rem_euclid(360.0),
+        "wet" => app?.wetness,
+        "brightness" => custom_state(app?).brightness,
+        "humidity" => custom_state(app?).humidity,
+        "temp" => app?.weather.as_ref()?.temp.0,
+        "wind_speed" => app?.weather.as_ref()?.wind.1,
+        "wind_dir" => app?.weather.as_ref()?.wind.0.rem_euclid(360.0),
         _ => return None,
     })
 }
 
-pub(super) fn option_set(
-    app: &mut App,
+pub(crate) fn option_set(
+    app: Option<&mut App>,
     verb: &str,
     arg: &str,
     v: f32,
 ) -> Option<(&'static str, String)> {
     if let Some(field) = verb.strip_prefix("vr_nav_") {
-        app.vr_nav_set(field, v);
+        app?.vr_nav_set(field, v);
         return None; // Stored per bus, never in the desktop settings file.
     }
     match verb {
@@ -265,6 +260,7 @@ pub(super) fn option_set(
             None
         }
         "traffic" => {
+            let app = app?;
             if let Some(t) = app.traffic.as_mut() {
                 t.target = v.round() as usize;
                 app.args.traffic = t.target;
@@ -374,7 +370,7 @@ pub(super) fn option_set(
         }
         "pvol" => {
             let id = arg.trim().parse().ok()?;
-            app.voice.volume.insert(id, (v * 10.0).round() / 10.0);
+            app?.voice.volume.insert(id, (v * 10.0).round() / 10.0);
             None
         }
         "wheel_range" => {
@@ -435,6 +431,7 @@ pub(super) fn option_set(
             None
         }
         "hour" | "minute" => {
+            let app = app?;
             if app
                 .lan
                 .as_ref()
@@ -459,11 +456,11 @@ pub(super) fn option_set(
         }
         // the weather, made by hand (what the preset was stays as it was but for this)
         "visibility" => {
-            app.edit_weather(|w| w.fog.0 = v);
+            app?.edit_weather(|w| w.fog.0 = v);
             None
         }
         "rain_amt" => {
-            app.edit_weather(|w| {
+            app?.edit_weather(|w| {
                 w.precip[1] = (v * 255.0).round();
                 if v > 0.0 && w.precip[0] < 0.5 {
                     w.precip[0] = 1.0;
@@ -472,76 +469,65 @@ pub(super) fn option_set(
             None
         }
         "wet" => {
+            let app = app?;
             let mut c = custom_state(app);
             c.road_wetness = v;
             app.set_custom_weather(c);
             None
         }
         "brightness" => {
+            let app = app?;
             let mut c = custom_state(app);
             c.brightness = v;
             app.set_custom_weather(c);
             None
         }
         "humidity" => {
+            let app = app?;
             let mut c = custom_state(app);
             c.humidity = v;
             app.set_custom_weather(c);
             None
         }
         "temp" => {
-            app.edit_weather(|w| w.temp.0 = v);
+            app?.edit_weather(|w| w.temp.0 = v);
             None
         }
         "wind_speed" => {
-            app.edit_weather(|w| w.wind.1 = v);
+            app?.edit_weather(|w| w.wind.1 = v);
             None
         }
         "wind_dir" => {
-            app.edit_weather(|w| w.wind.0 = v);
+            app?.edit_weather(|w| w.wind.0 = v);
             None
         }
         _ => None,
     }
 }
 
-pub(super) fn toggle_now(app: &App, id: &str) -> Option<bool> {
+/// None for what only a running game has: the launcher shows no row for it.
+pub(crate) fn toggle_now(app: Option<&App>, id: &str) -> Option<bool> {
+    let nav = app.and_then(|a| a.navigator.as_ref());
     Some(match id {
-        "navigator" => {
-            if app.vr_active() {
-                app.vr_nav_profile().enabled
-            } else {
-                app.navigator.as_ref().is_some_and(|n| n.enabled)
-            }
-        }
-        "nav_ai" => app
-            .navigator
-            .as_ref()
-            .map_or(::config::get_bool("navigator", "ai").unwrap_or(true), |n| {
-                n.show_ai
-            }),
-        "nav_topbar" => app.navigator.as_ref().map_or(
-            ::config::get_bool("navigator", "topbar").unwrap_or(true),
-            |n| n.show_topbar,
-        ),
-        "nav_turn" => app.navigator.as_ref().map_or(
-            ::config::get_bool("navigator", "turn").unwrap_or(true),
-            |n| n.show_turn,
-        ),
-        "nav_stoplist" => app.navigator.as_ref().map_or(
-            ::config::get_bool("navigator", "stoplist").unwrap_or(true),
-            |n| n.show_stoplist,
-        ),
-        "nav_stops_ext" => app.navigator.as_ref().map_or(
-            ::config::get_bool("navigator", "stops_ext").unwrap_or(false),
-            |n| n.schedule,
-        ),
+        "navigator" => match app {
+            Some(app) if app.vr_active() => app.vr_nav_profile().enabled,
+            Some(app) => app.navigator.as_ref().is_some_and(|n| n.enabled),
+            None => ::config::get_bool("ui", "navigator").unwrap_or(true),
+        },
+        "nav_ai" => nav.map_or(::config::get_bool("navigator", "ai").unwrap_or(true), |n| n.show_ai),
+        "nav_topbar" => nav.map_or(::config::get_bool("navigator", "topbar").unwrap_or(true), |n| n.show_topbar),
+        "nav_turn" => nav.map_or(::config::get_bool("navigator", "turn").unwrap_or(true), |n| n.show_turn),
+        "nav_stoplist" => nav.map_or(::config::get_bool("navigator", "stoplist").unwrap_or(true), |n| n.show_stoplist),
+        "nav_stops_ext" => nav.map_or(::config::get_bool("navigator", "stops_ext").unwrap_or(false), |n| n.schedule),
         "shadows" => ::config::get_bool("graphics", "shadows").unwrap_or(true),
         "head" => ::config::get_bool("camera", "head_movement").unwrap_or(true),
         "cam_smooth" => ::config::get_bool("camera", "smooth").unwrap_or(true),
         "coll_objects" => ::config::get_bool("gameplay", "collision_objects").unwrap_or(true),
         "coll_vehicles" => ::config::get_bool("gameplay", "collision_vehicles").unwrap_or(true),
-        "mouse" => app.mouse_drive,
+        "mouse" => app.map_or_else(
+            || ::config::get_bool("controls", "mouse_steering").unwrap_or(false),
+            |a| a.mouse_drive,
+        ),
         "mouse_right" => ::config::get_bool("controls", "mouse_right_off").unwrap_or(false),
         "blinker_cancel" => ::config::get_bool("controls", "blinker_cancel").unwrap_or(true),
         "steer_center" => ::config::get_bool("controls", "steer_center").unwrap_or(true),
@@ -549,8 +535,8 @@ pub(super) fn toggle_now(app: &App, id: &str) -> Option<bool> {
         "auto_ibis" => ::config::get_bool("gameplay", "auto_ibis").unwrap_or(false),
         "time_sync" => ::config::get_bool("gameplay", "time_sync").unwrap_or(false),
         "metar_sync" => ::config::get_bool("gameplay", "metar_sync").unwrap_or(false),
-        "snow_cover" => app.weather.as_ref().is_some_and(|w| w.snow),
-        "snow_road" => app.weather.as_ref().is_some_and(|w| w.snow_on_road),
+        "snow_cover" => app?.weather.as_ref().is_some_and(|w| w.snow),
+        "snow_road" => app?.weather.as_ref().is_some_and(|w| w.snow_on_road),
         "camcoll" => ::config::get_bool("camera", "collision").unwrap_or(true),
         "steer_look" => ::config::get_bool("camera", "steer_look").unwrap_or(false),
         "hands_in_cab" => ::config::get_bool("gameplay", "hands_in_cab").unwrap_or(false),
@@ -558,16 +544,15 @@ pub(super) fn toggle_now(app: &App, id: &str) -> Option<bool> {
         "brake_hold" => ::config::get_bool("controls", "brake_hold").unwrap_or(true),
         "auto_clutch" => ::config::get_bool("gameplay", "auto_clutch").unwrap_or(true),
         "headtrack" => ::config::get_bool("camera", "head_tracking").unwrap_or(false),
-        "timetable_win" => app.timetable,
-        "info_bar" => app.info_bar,
-        "nav_arrows" => app.navigator.as_ref().map_or(
-            ::config::get_bool("navigator", "arrows").unwrap_or(false),
-            |n| n.arrows,
-        ),
+        "timetable_win" => app?.timetable,
+        "info_bar" => app?.info_bar,
+        "nav_arrows" => nav.map_or(::config::get_bool("navigator", "arrows").unwrap_or(false), |n| n.arrows),
         "exact_fare" => ::config::get_bool("gameplay", "exact_fare").unwrap_or(true),
         "pax_prefer_seats" => ::config::get_bool("gameplay", "pax_prefer_seats").unwrap_or(false),
         "pax_rear_entry" => ::config::get_bool("gameplay", "pax_rear_entry").unwrap_or(true),
-        "pax_ik" => app.args.pax_ik.unwrap_or(::config::get_bool("passengers", "ik").unwrap_or(true)),
+        "pax_ik" => app
+            .and_then(|a| a.args.pax_ik)
+            .unwrap_or(::config::get_bool("passengers", "ik").unwrap_or(true)),
         "collision_pedestrians" => ::config::get_bool("gameplay", "collision_pedestrians").unwrap_or(true),
         "ssao" => ::config::get_bool("graphics", "ssao").unwrap_or(true),
         "detail_textures" => ::config::get_bool("graphics", "detail_textures").unwrap_or(true),
@@ -606,20 +591,22 @@ pub(super) fn toggle_now(app: &App, id: &str) -> Option<bool> {
         "notes" => ::config::get_bool("ui", "notes").unwrap_or(true),
         "chat" => ::config::get_bool("ui", "chat").unwrap_or(true),
         "name_tags" => ::config::get_bool("ui", "name_tags").unwrap_or(true),
+        "update_check" => ::config::get_bool("launcher", "update_check").unwrap_or(true),
+        "update_auto" => ::config::get_bool("launcher", "update_auto").unwrap_or(false),
         _ => return None,
     })
 }
 
-pub(super) fn toggle_set(app: &mut App, id: &str, on: bool) -> Option<(&'static str, String)> {
+pub(crate) fn toggle_set(mut app: Option<&mut App>, id: &str, on: bool) -> Option<(&'static str, String)> {
     match id {
         "navigator" => {
-            if app.vr_active() {
+            if let Some(app) = app.as_deref_mut().filter(|a| a.vr_active()) {
                 if app.vr_nav_profile().enabled != on {
                     app.vr_nav_adjust("enabled", 1.0);
                 }
                 return None;
             }
-            if let Some(n) = app.navigator.as_mut() {
+            if let Some(n) = app.as_deref_mut().and_then(|a| a.navigator.as_mut()) {
                 n.enabled = on;
             }
             ::config::set_setting("ui", "navigator", on);
@@ -627,7 +614,7 @@ pub(super) fn toggle_set(app: &mut App, id: &str, on: bool) -> Option<(&'static 
             None
         }
         "nav_ai" => {
-            if let Some(n) = app.navigator.as_mut() {
+            if let Some(n) = app.as_deref_mut().and_then(|a| a.navigator.as_mut()) {
                 n.show_ai = on;
             }
             ::config::set_setting("navigator", "ai", on);
@@ -635,7 +622,7 @@ pub(super) fn toggle_set(app: &mut App, id: &str, on: bool) -> Option<(&'static 
             None
         }
         "nav_topbar" => {
-            if let Some(n) = app.navigator.as_mut() {
+            if let Some(n) = app.as_deref_mut().and_then(|a| a.navigator.as_mut()) {
                 n.show_topbar = on;
             }
             ::config::set_setting("navigator", "topbar", on);
@@ -643,7 +630,7 @@ pub(super) fn toggle_set(app: &mut App, id: &str, on: bool) -> Option<(&'static 
             None
         }
         "nav_turn" => {
-            if let Some(n) = app.navigator.as_mut() {
+            if let Some(n) = app.as_deref_mut().and_then(|a| a.navigator.as_mut()) {
                 n.show_turn = on;
             }
             ::config::set_setting("navigator", "turn", on);
@@ -651,7 +638,7 @@ pub(super) fn toggle_set(app: &mut App, id: &str, on: bool) -> Option<(&'static 
             None
         }
         "nav_stoplist" => {
-            if let Some(n) = app.navigator.as_mut() {
+            if let Some(n) = app.as_deref_mut().and_then(|a| a.navigator.as_mut()) {
                 n.show_stoplist = on;
             }
             ::config::set_setting("navigator", "stoplist", on);
@@ -659,7 +646,7 @@ pub(super) fn toggle_set(app: &mut App, id: &str, on: bool) -> Option<(&'static 
             None
         }
         "nav_stops_ext" => {
-            if let Some(n) = app.navigator.as_mut() {
+            if let Some(n) = app.as_deref_mut().and_then(|a| a.navigator.as_mut()) {
                 n.schedule = on;
             }
             ::config::set_setting("navigator", "stops_ext", on);
@@ -685,9 +672,11 @@ pub(super) fn toggle_set(app: &mut App, id: &str, on: bool) -> Option<(&'static 
         "coll_objects" => {
             ::config::set_setting("gameplay", "collision_objects", on);
             let _ = ::config::save();
-            let cw = app.world.as_ref().map(|w| w.collision.lock().clone());
-            if let Some(p) = app.player.as_mut() {
-                p.vehicle.collision = cw.filter(|_| on);
+            if let Some(app) = app {
+                let cw = app.world.as_ref().map(|w| w.collision.lock().clone());
+                if let Some(p) = app.player.as_mut() {
+                    p.vehicle.collision = cw.filter(|_| on);
+                }
             }
             None
         }
@@ -697,8 +686,9 @@ pub(super) fn toggle_set(app: &mut App, id: &str, on: bool) -> Option<(&'static 
             None
         }
         "mouse" => {
-            app.mouse_drive = on;
             App::save_mouse_drive(on);
+            let app = app?;
+            app.mouse_drive = on;
             if !app.mouse_drive {
                 player::keep_wheel(app.player.as_mut());
             }
@@ -733,7 +723,7 @@ pub(super) fn toggle_set(app: &mut App, id: &str, on: bool) -> Option<(&'static 
         "blinker_cancel" => {
             ::config::set_setting("controls", "blinker_cancel", on);
             let _ = ::config::save();
-            if let Some(p) = app.player.as_mut() {
+            if let Some(p) = app.as_deref_mut().and_then(|a| a.player.as_mut()) {
                 p.blinker_cancel = on;
             }
             None
@@ -746,7 +736,7 @@ pub(super) fn toggle_set(app: &mut App, id: &str, on: bool) -> Option<(&'static 
         "auto_ibis" => {
             ::config::set_setting("gameplay", "auto_ibis", on);
             let _ = ::config::save();
-            if let Some(p) = app.player.as_mut() {
+            if let Some(p) = app.as_deref_mut().and_then(|a| a.player.as_mut()) {
                 p.auto_ibis = on;
             }
             None
@@ -756,6 +746,7 @@ pub(super) fn toggle_set(app: &mut App, id: &str, on: bool) -> Option<(&'static 
         "time_sync" => {
             ::config::set_setting("gameplay", "time_sync", on);
             let _ = ::config::save();
+            let app = app?;
             if let Some(l) = app.lan.as_mut().filter(|l| l.role == ::network::Role::Host) {
                 l.clock_speed = if on {
                     1.0
@@ -773,6 +764,7 @@ pub(super) fn toggle_set(app: &mut App, id: &str, on: bool) -> Option<(&'static 
         "metar_sync" => {
             ::config::set_setting("gameplay", "metar_sync", on);
             let _ = ::config::save();
+            let app = app?;
             app.metar_rx = None;
             app.metar_once = false;
             app.metar_next = 0.0;
@@ -783,11 +775,11 @@ pub(super) fn toggle_set(app: &mut App, id: &str, on: bool) -> Option<(&'static 
             None
         }
         "snow_cover" => {
-            app.edit_weather(|w| w.snow = on);
+            app?.edit_weather(|w| w.snow = on);
             None
         }
         "snow_road" => {
-            app.edit_weather(|w| w.snow_on_road = on);
+            app?.edit_weather(|w| w.snow_on_road = on);
             None
         }
         "fps" => {
@@ -823,7 +815,7 @@ pub(super) fn toggle_set(app: &mut App, id: &str, on: bool) -> Option<(&'static 
         "auto_clutch" => {
             ::config::set_setting("gameplay", "auto_clutch", on);
             let _ = ::config::save();
-            if let Some(p) = app.player.as_mut() {
+            if let Some(p) = app.as_deref_mut().and_then(|a| a.player.as_mut()) {
                 p.vehicle.host.auto_clutch = if on { 1.0 } else { 0.0 };
             }
             None
@@ -834,11 +826,11 @@ pub(super) fn toggle_set(app: &mut App, id: &str, on: bool) -> Option<(&'static 
             None
         }
         "timetable_win" => {
-            app.timetable = on;
+            app?.timetable = on;
             None
         }
         "info_bar" => {
-            app.info_bar = on;
+            app?.info_bar = on;
             None
         }
         "nav_arrows" => {
@@ -899,14 +891,18 @@ pub(super) fn toggle_set(app: &mut App, id: &str, on: bool) -> Option<(&'static 
             };
             ::config::set_setting("graphics", "window_mode", mode);
             let _ = ::config::save();
-            apply_window_mode(app, mode);
+            if let Some(app) = app {
+                apply_window_mode(app, mode);
+            }
             None
         }
         "triple_screen" => {
             ::config::set_setting("graphics", id, on);
             if on {
                 ::config::set_setting("graphics", "window_mode", "windowed");
-                apply_window_mode(app, "windowed");
+                if let Some(app) = app {
+                    apply_window_mode(app, "windowed");
+                }
             }
             let _ = ::config::save();
             None
@@ -949,7 +945,9 @@ pub(super) fn toggle_set(app: &mut App, id: &str, on: bool) -> Option<(&'static 
         "free_look" => {
             ::config::set_setting("camera", "free_look", on);
             let _ = ::config::save();
-            app.free_look = false;
+            if let Some(app) = app {
+                app.free_look = false;
+            }
             None
         }
         "crosshair" => {
@@ -1002,7 +1000,7 @@ pub(super) fn toggle_set(app: &mut App, id: &str, on: bool) -> Option<(&'static 
         "auto_shift" => {
             ::config::set_setting("gameplay", "auto_shift", on);
             let _ = ::config::save();
-            if let Some(p) = app.player.as_mut() {
+            if let Some(p) = app.as_deref_mut().and_then(|a| a.player.as_mut()) {
                 p.auto_shift = on;
             }
             None
@@ -1034,6 +1032,11 @@ pub(super) fn toggle_set(app: &mut App, id: &str, on: bool) -> Option<(&'static 
         }
         "name_tags" => {
             ::config::set_setting("ui", "name_tags", on);
+            let _ = ::config::save();
+            None
+        }
+        "update_check" | "update_auto" => {
+            ::config::set_setting("launcher", id, on);
             let _ = ::config::save();
             None
         }

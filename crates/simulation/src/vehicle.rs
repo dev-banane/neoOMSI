@@ -1014,6 +1014,25 @@ pub struct VehicleInstance {
     v_springfactor: Vec<[Option<::legacy_script::VarId>; 2]>,
 }
 
+#[inline]
+fn lookup_var_index<'a>(
+    var_index: &'a HashMap<String, ::legacy_script::VarId>,
+    name: &str,
+) -> Option<&'a ::legacy_script::VarId> {
+    if !name.bytes().any(|b| b.is_ascii_uppercase()) {
+        var_index.get(name)
+    } else if name.len() <= 64 {
+        let mut buf = [0u8; 64];
+        let slice = &mut buf[..name.len()];
+        slice.copy_from_slice(name.as_bytes());
+        slice.make_ascii_lowercase();
+        let lower = std::str::from_utf8(slice).unwrap_or(name);
+        var_index.get(lower)
+    } else {
+        var_index.get(&name.to_ascii_lowercase())
+    }
+}
+
 impl VehicleInstance {
     /// The fleet number the scripts know as `number` (empty for a vehicle without one).
     pub fn number(&self) -> String {
@@ -1285,13 +1304,18 @@ impl VehicleInstance {
             .collect();
     }
 
-    /// Current text of a string variable (empty when it does not exist).
-    pub fn str_var(&self, name: &str) -> String {
+    /// Current text of a string variable as a borrowed slice (empty when it does not exist).
+    pub fn str_var_str(&self, name: &str) -> &str {
         self.ty
             .program
             .str_var(name)
-            .map(|i| self.state.str_vars[i as usize].clone())
-            .unwrap_or_default()
+            .map(|i| self.state.str_vars[i as usize].as_str())
+            .unwrap_or("")
+    }
+
+    /// Current text of a string variable (empty when it does not exist).
+    pub fn str_var(&self, name: &str) -> String {
+        self.str_var_str(name).to_string()
     }
 
     /// Re-render changed text textures; returns the indices with a pending image.
@@ -1468,8 +1492,9 @@ impl VehicleInstance {
         // a mod that brakes only inside an {if} (a retarder, a stop brake, its own physics)
         // stayed braked for good, and one that adds to its own value kept on growing.
         self.put(self.v_brakeforce, 0.0);
-        for a in self.v_wheels.clone() {
-            for w in a {
+        for a in 0..self.v_wheels.len() {
+            let axle = self.v_wheels[a];
+            for w in axle {
                 self.put(w[4], 0.0);
             }
         }
@@ -1625,20 +1650,19 @@ impl VehicleInstance {
         // straight down on the front wheel alone (OMSI_ONLY_MESH=SD_Rad_VL) and at the
         // steering wheel in the cab, which turn together with this sign.
         let steer = self.physics.steer_deg.to_radians();
-        for (ai, axle) in self.v_wheels.clone().iter().enumerate() {
+        let steered = self.steered_axle();
+        for ai in 0..self.v_wheels.len() {
+            let axle = self.v_wheels[ai];
             for (si, w) in axle.iter().enumerate() {
-                let ws = self.physics.wheels[ai][si].clone();
-                self.put(w[0], ws.rotation_deg.to_radians());
-                self.put(w[1], ws.rpm);
-                self.put(
-                    w[2],
-                    if ai == self.steered_axle() {
-                        steer
-                    } else {
-                        0.0
-                    },
-                );
-                self.put(w[3], ws.suspension);
+                let ws = &self.physics.wheels[ai][si];
+                let rot = ws.rotation_deg.to_radians();
+                let rpm = ws.rpm;
+                let st = if ai == steered { steer } else { 0.0 };
+                let susp = ws.suspension;
+                self.put(w[0], rot);
+                self.put(w[1], rpm);
+                self.put(w[2], st);
+                self.put(w[3], susp);
             }
         }
     }
@@ -1751,12 +1775,12 @@ impl VehicleInstance {
             rb.friction = lead.friction;
             rb.wheel_walls = self.wheel_walls;
             for (i, w) in rb.wheels.iter_mut().enumerate() {
-                let axle = t.first_axle + i / 2;
-                let side = if i % 2 == 0 { "L" } else { "R" };
-                w.spring_factor = self
-                    .ty
-                    .program
-                    .var(&format!("Axle_Springfactor_{axle}_{side}"))
+                let a = i / 2;
+                let side_idx = i % 2;
+                w.spring_factor = t
+                    .v_springfactor
+                    .get(a)
+                    .and_then(|pair| pair[side_idx])
                     .map(|id| self.state.vars[id as usize])
                     .unwrap_or(1.0);
             }
@@ -2078,14 +2102,19 @@ impl VehicleInstance {
         self.put(self.v_accel[0], a.x);
         self.put(self.v_accel[1], a.y);
         self.put(self.v_accel[2], a.z);
-        for (ai, axle) in self.v_wheels.clone().iter().enumerate() {
+        for ai in 0..self.v_wheels.len() {
+            let axle = self.v_wheels[ai];
             for (si, w) in axle.iter().enumerate() {
                 if let Some(rw) = rb.wheels.get(ai * 2 + si) {
-                    self.put(w[0], rw.rotation_deg.to_radians());
-                    self.put(w[1], rw.rpm);
+                    let rot = rw.rotation_deg.to_radians();
+                    let rpm = rw.rpm;
+                    let steer = rw.steer;
+                    let shown = -rw.compression.max(0.0);
+                    self.put(w[0], rot);
+                    self.put(w[1], rpm);
                     // (each axle's own angle: OMSI turns every axle towards the centre of
                     // the bend on the `[rot_pnt_long]` line)
-                    self.put(w[2], rw.steer);
+                    self.put(w[2], steer);
                     // `Axle_Suspension_*` is the wheel's travel *relative to the body*, and
                     // the stock model.cfg moves the wheel down for a positive value
                     // (`origin_rot_y -90` + `anim_trans`, checked with OMSI_DEBUG_ANIM on
@@ -2097,7 +2126,6 @@ impl VehicleInstance {
                     // (never below where the spring is unloaded: Omsi.exe hands over
                     // -clamp(travel, 0, maxforce / k), 0x7e4afa - a wheel in the air stays
                     // where it hangs at rest)
-                    let shown = -rw.compression.max(0.0);
                     self.put(w[3], shown);
                     if let Some(ws) = self.physics.wheels.get_mut(ai).and_then(|a| a.get_mut(si)) {
                         ws.rotation_deg = rw.rotation_deg;
@@ -2110,17 +2138,14 @@ impl VehicleInstance {
         self.rigid = Some(rb);
     }
 
+
     /// Where variable `name` sits among the script's variables (`State::vars`).
     pub fn var_slot(&self, name: &str) -> Option<usize> {
-        self.var_index
-            .get(&name.to_ascii_lowercase())
-            .map(|&i| i as usize)
+        lookup_var_index(&self.var_index, name).map(|&i| i as usize)
     }
 
     pub fn var(&self, name: &str) -> Option<f32> {
-        self.var_index
-            .get(&name.to_ascii_lowercase())
-            .map(|&i| self.state.vars[i as usize])
+        lookup_var_index(&self.var_index, name).map(|&i| self.state.vars[i as usize])
     }
 
     /// Whether variable `name` was declared in the vehicle's script set (as opposed to built-in host variables).
@@ -2137,7 +2162,7 @@ impl VehicleInstance {
     }
 
     pub fn set_var(&mut self, name: &str, v: f32) -> bool {
-        match self.var_index.get(&name.to_ascii_lowercase()) {
+        match lookup_var_index(&self.var_index, name) {
             Some(&i) => {
                 self.state.vars[i as usize] = v;
                 true
@@ -2507,7 +2532,8 @@ impl VehicleInstance {
         // every wheel rolls as far as its own track through the bend is long
         let (rot, wheelbase) = crate::ai_motion::rotation_point(&self.ty.def);
         let k = ai.steer_deg.to_radians().tan() / wheelbase;
-        for (ai_idx, axle) in self.v_wheels.clone().iter().enumerate() {
+        for ai_idx in 0..self.v_wheels.len() {
+            let axle = self.v_wheels[ai_idx];
             for (si, w) in axle.iter().enumerate() {
                 let Some(ws) = self.physics.wheels.get_mut(ai_idx).map(|a| &mut a[si]) else {
                     continue;
@@ -3241,7 +3267,7 @@ impl PropsPlan {
         if self.built && self.vars_seen == var_index.len() {
             return;
         }
-        let var = |v: &str| var_index.get(&v.to_ascii_lowercase()).map(|&i| i as usize);
+        let var = |v: &str| lookup_var_index(var_index, v).map(|&i| i as usize);
         let source = |v: &str| match v.trim().parse::<f32>() {
             Ok(c) => PropSource::Const(c),
             Err(_) => var(v).map(PropSource::Var).unwrap_or(PropSource::Missing),
@@ -3484,6 +3510,12 @@ pub struct TrailerPart {
     rest: Vec<(f32, f32, f32)>,
     /// `Axle_Brakeforce_<axle>_L/R` of this part's axles, in the leading vehicle's scripts.
     v_brakes: Vec<Option<::legacy_script::VarId>>,
+    /// Cached script variable IDs for wheels/axles in the leading vehicle's program.
+    v_springfactor: Vec<[Option<::legacy_script::VarId>; 2]>,
+    v_suspension: Vec<[Option<::legacy_script::VarId>; 2]>,
+    v_wheel_rotation: Vec<[Option<::legacy_script::VarId>; 2]>,
+    v_wheel_rotationspeed: Vec<[Option<::legacy_script::VarId>; 2]>,
+    v_axle_steering: Vec<[Option<::legacy_script::VarId>; 2]>,
     /// How far the part's origin stands above the ground under its axles (m).
     ground_lift: f32,
     /// The part's pitch (degrees, nose up) and lean (degrees, as the vehicle's `bank`) as
@@ -3500,6 +3532,7 @@ pub struct TrailerPart {
     /// The track under its turning axle, when it runs on rails (`VehicleInstance::retrail`):
     /// it stands at the track's height, not on whatever the ground probe finds there.
     track: Option<DVec3>,
+    held: Option<DVec3>,
     /// Mesh property sources, resolved against the leading vehicle's variables.
     props_plan: PropsPlan,
     /// The meshes' transforms in the modelled pose, for `[smoothskin]` (made when needed).
@@ -3665,11 +3698,62 @@ impl TrailerPart {
                     .map(|side| program.var(&format!("Axle_Brakeforce_{}_{side}", first_axle + a)))
             })
             .collect();
+        let num_axles = ty.def.axles.len().max(1);
+        let v_springfactor = (0..num_axles)
+            .map(|a| {
+                let k = first_axle + a;
+                [
+                    program.var(&format!("Axle_Springfactor_{k}_L")),
+                    program.var(&format!("Axle_Springfactor_{k}_R")),
+                ]
+            })
+            .collect();
+        let v_suspension = (0..num_axles)
+            .map(|a| {
+                let k = first_axle + a;
+                [
+                    program.var(&format!("Axle_Suspension_{k}_L")),
+                    program.var(&format!("Axle_Suspension_{k}_R")),
+                ]
+            })
+            .collect();
+        let v_wheel_rotation = (0..num_axles)
+            .map(|a| {
+                let k = first_axle + a;
+                [
+                    program.var(&format!("Wheel_Rotation_{k}_L")),
+                    program.var(&format!("Wheel_Rotation_{k}_R")),
+                ]
+            })
+            .collect();
+        let v_wheel_rotationspeed = (0..num_axles)
+            .map(|a| {
+                let k = first_axle + a;
+                [
+                    program.var(&format!("Wheel_RotationSpeed_{k}_L")),
+                    program.var(&format!("Wheel_RotationSpeed_{k}_R")),
+                ]
+            })
+            .collect();
+        let v_axle_steering = (0..num_axles)
+            .map(|a| {
+                let k = first_axle + a;
+                [
+                    program.var(&format!("Axle_Steering_{k}_L")),
+                    program.var(&format!("Axle_Steering_{k}_R")),
+                ]
+            })
+            .collect();
         TrailerPart {
             particles: ParticleSet::new(ty.model.particle_systems(), first_axle as u64 * 7919 + 17),
             light_fade: Vec::new(),
             rest,
             v_brakes,
+            v_springfactor,
+            v_suspension,
+            v_wheel_rotation,
+            v_wheel_rotationspeed,
+            v_axle_steering,
             ground_lift: 0.0,
             pitch: 0.0,
             bank: 0.0,
@@ -3679,6 +3763,7 @@ impl TrailerPart {
             frame_brakes: Vec::new(),
             joint_angles: None,
             track: None,
+            held: None,
             v_alpha: program.var(&format!("articulation_{joint}_alpha")),
             v_beta: program.var(&format!("articulation_{joint}_beta")),
             animators,
@@ -3810,14 +3895,33 @@ impl TrailerPart {
         let rot = self.body_rotation();
         let c = position + rot.transform_point3(self.coupling_front).as_dvec3();
         let h = heading.to_radians();
-        self.pivot = Some(c - DVec3::new(h.sin(), h.cos(), 0.0) * self.length as f64);
+        let ahead = DVec3::new(h.sin(), h.cos(), 0.0);
+        let pivot = c - ahead * self.length as f64;
+        // (the follow step after this one sees the pivot standing still: the wheels roll
+        // as far as the pose moved)
+        if let Some(d) = self.pivot.map(|p| pivot - p).filter(|d| d.length() < 25.0) {
+            self.odometer += d.dot(ahead) as f32;
+        }
+        self.pivot = Some(pivot);
         self.position = position;
+        self.held = Some(position);
+    }
+
+    fn axle_z_through(&self, c: DVec3, origin: DVec3) -> f64 {
+        let h = self.heading.to_radians();
+        let d = c - origin;
+        let along = d.x * h.sin() + d.y * h.cos();
+        let reach = (self.coupling_front.y as f64).abs();
+        let pitch =
+            (d.z.atan2(along) - (self.coupling_front.z as f64).atan2(reach)).clamp(-0.3, 0.3);
+        c.z - self.coupling_front.z as f64 - self.length.max(0.5) as f64 * pitch.tan()
     }
 
     /// Forget where this part was: the next step puts it straight behind the leading part
     /// (after the vehicle was moved somewhere else).
     pub fn realign(&mut self) {
         self.pivot = None;
+        self.held = None;
         self.axle_z = None;
         self.track = None;
         self.rigid = None;
@@ -3924,21 +4028,22 @@ impl TrailerPart {
                         0.0
                     }
                 } else if self.ty.suspension_axles.contains(&axle) {
-                    let factor = main
-                        .var(&format!("Axle_Springfactor_{axle}_L"))
+                    let factor = self
+                        .v_springfactor
+                        .get(a)
+                        .and_then(|pair| pair[0])
+                        .map(|id| main.state.vars[id as usize])
                         .unwrap_or(1.0)
                         .max(0.05);
                     (load / (k * factor)).min(crate::rigid::BUMP)
                 } else {
                     0.0
                 };
-                for side in ["L", "R"] {
-                    if let Some(id) = main
-                        .ty
-                        .program
-                        .var(&format!("Axle_Suspension_{axle}_{side}"))
-                    {
-                        main.state.vars[id as usize] = -compression;
+                if let Some(pair) = self.v_suspension.get(a) {
+                    for opt_id in pair {
+                        if let Some(id) = opt_id {
+                            main.state.vars[*id as usize] = -compression;
+                        }
                     }
                 }
                 sag.push(offset - compression);
@@ -3947,10 +4052,14 @@ impl TrailerPart {
             self.ground_lift = lift as f32;
             // On rails: the track's height where it was put on it (the ground probe found the
             // platform edge or the embankment beside a bend, and the car jumped up and down).
-            let on_track = self
-                .track
-                .filter(|t| (t.truncate() - new_pivot.truncate()).length() < 1.0)
-                .map(|t| t.z);
+            // A LAN player's part: the height their game has it at.
+            let on_track = match self.held.take() {
+                Some(p) => Some(self.axle_z_through(c, p)),
+                None => self
+                    .track
+                    .filter(|t| (t.truncate() - new_pivot.truncate()).length() < 1.0)
+                    .map(|t| t.z),
+            };
             // the height of the part's origin over its axle (where the ground has none: level
             // with the coupling, as before)
             let level = c.z - self.coupling_front.z as f64;
@@ -4079,33 +4188,30 @@ impl TrailerPart {
         // rear section's wheels 57 times too fast: a flicker instead of a rolling wheel)
         let rot = (self.odometer / self.wheel_radius).rem_euclid(std::f32::consts::TAU);
         for a in 0..self.axle_count {
-            for side in ["L", "R"] {
-                let k = self.first_axle + a;
-                if let Some(id) = main.ty.program.var(&format!("Wheel_Rotation_{k}_{side}")) {
+            for side_idx in 0..2 {
+                if let Some(id) = self.v_wheel_rotation.get(a).and_then(|p| p[side_idx]) {
                     main.state.vars[id as usize] = rot;
                 }
-                if let Some(id) = main
-                    .ty
-                    .program
-                    .var(&format!("Wheel_RotationSpeed_{k}_{side}"))
-                {
+                if let Some(id) = self.v_wheel_rotationspeed.get(a).and_then(|p| p[side_idx]) {
                     main.state.vars[id as usize] = rpm;
                 }
             }
         }
         if let Some(rb) = &self.rigid {
             for (i, w) in rb.wheels.iter().enumerate() {
-                let axle = self.first_axle + i / 2;
-                let side = if i % 2 == 0 { "L" } else { "R" };
-                for (name, value) in [
-                    ("Wheel_Rotation", w.rotation_deg.to_radians()),
-                    ("Wheel_RotationSpeed", w.rpm),
-                    ("Axle_Steering", w.steer),
-                    ("Axle_Suspension", -w.compression.max(0.0)),
-                ] {
-                    if let Some(id) = main.ty.program.var(&format!("{name}_{axle}_{side}")) {
-                        main.state.vars[id as usize] = value;
-                    }
+                let a = i / 2;
+                let side_idx = i % 2;
+                if let Some(id) = self.v_wheel_rotation.get(a).and_then(|p| p[side_idx]) {
+                    main.state.vars[id as usize] = w.rotation_deg.to_radians();
+                }
+                if let Some(id) = self.v_wheel_rotationspeed.get(a).and_then(|p| p[side_idx]) {
+                    main.state.vars[id as usize] = w.rpm;
+                }
+                if let Some(id) = self.v_axle_steering.get(a).and_then(|p| p[side_idx]) {
+                    main.state.vars[id as usize] = w.steer;
+                }
+                if let Some(id) = self.v_suspension.get(a).and_then(|p| p[side_idx]) {
+                    main.state.vars[id as usize] = -w.compression.max(0.0);
                 }
             }
             if let Some(w) = rb.wheels.iter().find(|w| w.driven) {
@@ -4709,6 +4815,63 @@ mod tests {
                 "alpha {alpha} at heading {h}"
             );
         }
+    }
+
+    #[test]
+    fn a_remote_rear_section_takes_the_senders_pitch_and_rolls() {
+        let root = ::legacy_config::env::var_os("OMSI_ROOT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("../../../OMSI 2 Original"));
+        let bus = root.join("Vehicles/MAN_NL_NG/MAN_GN92_main.bus");
+        let trail = root.join("Vehicles/MAN_NL_NG/MAN_GN92_trail.bus");
+        if !bus.exists() || !trail.exists() {
+            eprintln!("skipped: no {}", bus.display());
+            return;
+        }
+        let ty = Arc::new(VehicleType::load(&root, &bus).expect("GN92"));
+        let part = Arc::new(VehicleType::load(&root, &trail).expect("GN92 trail"));
+        let make = || {
+            let mut v =
+                VehicleInstance::new(ty.clone(), VehicleHost::new(crate::SimClock::default()));
+            v.attach_trailer_ex(part.clone(), false);
+            v
+        };
+        let (mut sender, mut copy) = (make(), make());
+        sender.ground = Some(Arc::new(|_, y| Some(y * 0.06)));
+        copy.ground = None;
+        let (dt, speed) = (1.0 / 60.0, 8.0f32);
+        let axle = sender.physics.wheels.len();
+        let wheel = |v: &VehicleInstance| v.var(&format!("Wheel_Rotation_{axle}_L")).unwrap();
+        let mut odometer = 0.0;
+        let mut turned = 0.0;
+        for f in 0..120 {
+            odometer += speed * dt;
+            let frame = AiFrame {
+                speed,
+                odometer,
+                ..Default::default()
+            };
+            for v in [&mut sender, &mut copy] {
+                v.position = DVec3::new(0.0, odometer as f64, odometer as f64 * 0.06 + 0.5);
+                v.heading = f as f64 * 0.1;
+                v.pitch = 0.06f32.atan().to_degrees();
+            }
+            sender.update_ai_with(dt, &frame, &[], &[]);
+            let (at, heading) = (sender.trailers[0].position, sender.trailers[0].heading);
+            let before = wheel(&copy);
+            copy.trailers[0].set_pose(at, heading);
+            copy.update_ai_with(dt, &frame, &[], &[]);
+            turned += (wheel(&copy) - before).rem_euclid(std::f32::consts::TAU);
+        }
+        let (s, c) = (&sender.trailers[0], &copy.trailers[0]);
+        assert!(s.pitch.abs() > 2.0, "sender pitch {}", s.pitch);
+        assert!((s.pitch - c.pitch).abs() < 0.05, "{} vs {}", s.pitch, c.pitch);
+        assert!((s.position - c.position).length() < 0.01, "{} vs {}", s.position, c.position);
+        let rolled = odometer / part.def.axles[0].wheel_diameter * 2.0;
+        assert!(
+            (turned - rolled).abs() < 0.1 * rolled,
+            "turned {turned}, rolled {rolled}"
+        );
     }
 
     /// The stock rattle (`klappern.osc`) as loud at 144 frames a second as at OMSI's 30.
