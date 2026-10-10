@@ -3,7 +3,9 @@ use crate::scene::World;
 use anyhow::{Context, Result};
 use glam::{DVec3, Vec3};
 use omsi_launcher_lib as lib;
-use launcher_protocol::api::{Minimap, MinimapEntry, MinimapRoad, MinimapStop, Point};
+use launcher_protocol::api::{
+    Minimap, MinimapEntry, MinimapLane, MinimapRoad, MinimapStop, MinimapTrip, Point,
+};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -60,6 +62,54 @@ fn spawn(p: DVec3, heading: f64) -> String {
     format!("{},{},{}", round(p.x), round(p.y), round(heading.rem_euclid(360.0)))
 }
 
+fn line(points: &[DVec3]) -> Vec<Point> {
+    let origin = points.first().copied().unwrap_or_default();
+    let local: Vec<Vec3> = points.iter().map(|p| (*p - origin).as_vec3()).collect();
+    simplify(&local, TOLERANCE)
+        .iter()
+        .map(|p| Point {
+            x: round(origin.x + p.x as f64),
+            y: round(origin.y + p.y as f64),
+        })
+        .collect()
+}
+
+fn trip_routes(
+    root: &std::path::Path,
+    world: &World,
+    net: &::simulation::traffic::Network,
+    date: &str,
+) -> (Vec<MinimapLane>, HashMap<String, MinimapTrip>) {
+    let mut clock = ::simulation::SimClock::default();
+    let ymd: Vec<i32> = date.split('-').filter_map(|x| x.trim().parse().ok()).collect();
+    if let [y, m, d] = ymd[..] {
+        clock.set_date(y, m, d);
+    }
+    let schedule = crate::schedule::Schedule::new(root, world, &clock);
+    let mut lanes = Vec::new();
+    let mut placed: HashMap<usize, u32> = HashMap::new();
+    let mut trips = HashMap::new();
+    for trip in &schedule.data.trips {
+        let route = schedule.trip_route_in(net, &trip.name);
+        if route.is_empty() {
+            continue;
+        }
+        let ids = route
+            .into_iter()
+            .map(|l| {
+                *placed.entry(l).or_insert_with(|| {
+                    lanes.push(MinimapLane {
+                        points: line(&net.lanes[l].points),
+                    });
+                    (lanes.len() - 1) as u32
+                })
+            })
+            .collect();
+        trips.insert(trip.name.clone(), MinimapTrip { lanes: ids });
+    }
+    (lanes, trips)
+}
+
 fn build(map: &str, date: &str) -> Result<Minimap> {
     let t0 = std::time::Instant::now();
     let root = PathBuf::from(lib::load_config().root);
@@ -79,22 +129,11 @@ fn build(map: &str, date: &str) -> Result<Minimap> {
     confirm_road_surfaces(&mut net, &nav.road_surfaces);
     let roads: Vec<MinimapRoad> = road_geometry(&net)
         .into_iter()
-        .map(|r| {
+        .map(|r| MinimapRoad {
+            main: r.main,
+            width: round(r.width as f64),
             // some maps' coordinates run into millions, where an f32 is off by half a metre
-            let origin = r.points.first().copied().unwrap_or_default();
-            let points: Vec<Vec3> = r.points.iter().map(|p| (*p - origin).as_vec3()).collect();
-            let points = simplify(&points, TOLERANCE)
-                .iter()
-                .map(|p| Point {
-                    x: round(origin.x + p.x as f64),
-                    y: round(origin.y + p.y as f64),
-                })
-                .collect();
-            MinimapRoad {
-                main: r.main,
-                width: round(r.width as f64),
-                points,
-            }
+            points: line(&r.points),
         })
         .collect();
 
@@ -147,11 +186,14 @@ fn build(map: &str, date: &str) -> Result<Minimap> {
         })
         .collect();
 
+    let (lanes, trips) = trip_routes(&root, &world, &net, date);
     log::info!(
-        "minimap of {map}: {} roads, {} stops, {} entry points in {:.1} s",
+        "minimap of {map}: {} roads, {} stops, {} entry points, {} trips on {} lanes in {:.1} s",
         roads.len(),
         stops.len(),
         entries.len(),
+        trips.len(),
+        lanes.len(),
         t0.elapsed().as_secs_f64()
     );
     Ok(Minimap {
@@ -159,5 +201,7 @@ fn build(map: &str, date: &str) -> Result<Minimap> {
         roads,
         stops,
         entries,
+        lanes,
+        trips,
     })
 }
